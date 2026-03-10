@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+*.egg
+.eggs/
+
+# ROS2 build artifacts (these are in workspace root, but just in case)
+build/
+install/
+log/
+
+# Editor files
+*.swp
+*~
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Byte-compiled files
+*.py[cod]
