@@ -18,6 +18,12 @@ setup(
         # Include world files
         (os.path.join('share', package_name, 'worlds'), 
             glob('worlds/*.sdf')),
+        # Include AprilTag model
+        (os.path.join('share', package_name, 'models', 'apriltag_0'),
+            ['models/apriltag_0/model.config',
+             'models/apriltag_0/model.sdf']),
+        (os.path.join('share', package_name, 'models', 'apriltag_0', 'materials', 'textures'),
+            ['models/apriltag_0/materials/textures/tag36_11_00000.png']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +35,7 @@ setup(
     entry_points={
         'console_scripts': [
             'patrol_node = homeostatic_bot.patrol_node:main',
+            'battery_node = homeostatic_bot.battery_node:main',
         ],
     },
 )

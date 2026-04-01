@@ -123,14 +123,16 @@
       </link>
     </model>
     
-    <!-- CHARGING STATION (Green platform in corner) -->
+    <!-- ============== CHARGING STATION ============== -->
+    
+    <!-- Charging zone (green platform - robot must be here to charge) -->
     <model name="charging_station">
       <static>true</static>
       <pose>4 4 0.01 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
-            <box><size>1.5 1.5 0.02</size></box>
+            <box><size>1.0 1.0 0.02</size></box>
           </geometry>
           <material>
             <ambient>0.0 0.8 0.0 1</ambient>
@@ -140,27 +142,32 @@
       </link>
     </model>
     
-    <!-- Charging station marker (tall green pole) -->
-    <model name="charging_marker">
+    <!-- Charging station mounting post (holds the AprilTag) -->
+    <model name="charging_post">
       <static>true</static>
-      <pose>4 4 0.5 0 0 0</pose>
+      <pose>4.4 4 0.2 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>
-            <cylinder>
-              <radius>0.05</radius>
-              <length>1.0</length>
-            </cylinder>
+            <box><size>0.05 0.2 0.4</size></box>
           </geometry>
           <material>
-            <ambient>0.0 1.0 0.0 1</ambient>
-            <diffuse>0.0 1.0 0.0 1</diffuse>
+            <ambient>0.2 0.2 0.2 1</ambient>
+            <diffuse>0.3 0.3 0.3 1</diffuse>
           </material>
         </visual>
       </link>
     </model>
     
-    <!-- Obstacles (Brown boxes) -->
+    <!-- AprilTag (mounted vertically, facing into arena) -->
+    <include>
+      <uri>model://apriltag_0</uri>
+      <name>charging_tag</name>
+      <pose>4.35 4 0.28 0 1.5708 3.14159</pose>
+    </include>
+    
+    <!-- ============== OBSTACLES ============== -->
+    
     <model name="obstacle1">
       <static>true</static>
       <pose>0 2 0.25 0 0 0</pose>
