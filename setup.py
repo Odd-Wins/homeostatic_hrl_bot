@@ -36,6 +36,7 @@ setup(
         'console_scripts': [
             'patrol_node = homeostatic_bot.patrol_node:main',
             'battery_node = homeostatic_bot.battery_node:main',
+            'docking_controller = homeostatic_bot.docking_controller:main',
         ],
     },
 )
