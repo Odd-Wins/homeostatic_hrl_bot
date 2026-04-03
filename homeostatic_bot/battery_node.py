@@ -1,9 +1,7 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Bool
 from geometry_msgs.msg import TwistStamped
-from nav_msgs.msg import Odometry
-import math
 
 
 class BatteryNode(Node):
@@ -12,13 +10,8 @@ class BatteryNode(Node):
         
         # Battery parameters
         self.soc = 100.0  # State of Charge (0-100%)
-        self.soh = 100.0  # State of Health (0-100%) - for degradation 
+        self.soh = 100.0  # State of Health (0-100%) - for degradation
         self.max_capacity = 100.0  # Maximum capacity at 100% SOH
-        
-        # Charging station location 
-        self.charge_station_x = 5.27
-        self.charge_station_y = 3.23
-        self.charge_radius = 0.75  # How close robot needs to be
         
         # Rates
         self.drain_rate_moving = 0.5    # % per second when moving
@@ -27,8 +20,7 @@ class BatteryNode(Node):
         
         # State tracking
         self.is_moving = False
-        self.robot_x = 0.0
-        self.robot_y = 0.0
+        self.is_charging = False  # Now from /charging/detected topic
         
         # Publishers
         self.soc_publisher = self.create_publisher(Float32, '/battery/soc', 10)
@@ -42,10 +34,10 @@ class BatteryNode(Node):
             10
         )
         
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            '/odom',
-            self.odom_callback,
+        self.charging_sub = self.create_subscription(
+            Bool,
+            '/charging/detected',
+            self.charging_callback,
             10
         )
         
@@ -53,7 +45,7 @@ class BatteryNode(Node):
         self.timer = self.create_timer(0.1, self.update_battery)
         
         self.get_logger().info('Battery Node Started!')
-        self.get_logger().info(f'Charging station at ({self.charge_station_x}, {self.charge_station_y})')
+        self.get_logger().info('Listening for charging status on /charging/detected')
 
     def cmd_vel_callback(self, msg):
         """Check if robot is moving based on velocity commands."""
@@ -61,24 +53,15 @@ class BatteryNode(Node):
         angular = abs(msg.twist.angular.z)
         self.is_moving = (linear > 0.01) or (angular > 0.01)
 
-    def odom_callback(self, msg):
-        """Track robot position."""
-        self.robot_x = msg.pose.pose.position.x
-        self.robot_y = msg.pose.pose.position.y
-
-    def is_at_charging_station(self):
-        """Check if robot is within range of charging station."""
-        distance = math.sqrt(
-            (self.robot_x - self.charge_station_x) ** 2 +
-            (self.robot_y - self.charge_station_y) ** 2
-        )
-        return distance <= self.charge_radius
+    def charging_callback(self, msg):
+        """Update charging state from docking controller."""
+        self.is_charging = msg.data
 
     def update_battery(self):
         """Update battery state every 0.1 seconds."""
         dt = 0.1  # Time step in seconds
         
-        if self.is_at_charging_station() and self.soc < 100.0:
+        if self.is_charging and self.soc < 100.0:
             # Charging
             self.soc += self.charge_rate * dt
             self.soc = min(self.soc, 100.0)  # Cap at 100%
@@ -103,7 +86,7 @@ class BatteryNode(Node):
         soh_msg.data = self.soh
         self.soh_publisher.publish(soh_msg)
         
-        # Log every 5 seconds (every 50 updates)
+        # Log every 5 seconds
         if int(self.get_clock().now().nanoseconds / 1e9) % 5 == 0:
             if not hasattr(self, '_last_log_time'):
                 self._last_log_time = 0

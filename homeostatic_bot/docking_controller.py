@@ -21,7 +21,7 @@ class DockingController(Node):
         # Parameters
         self.declare_parameter('target_frame', 'tag36h11:0')
         self.declare_parameter('camera_frame', 'camera_rgb_frame')
-        self.declare_parameter('docking_distance', 0.5)  # Stop 0.5m from tag
+        self.declare_parameter('docking_distance', 0.75)  # Stop 0.75m from tag
         self.declare_parameter('kp_angular', 1.0)        # Turn speed gain
         self.declare_parameter('kp_linear', 0.3)         # Forward speed gain
         self.declare_parameter('max_angular', 0.5)       # Max turn speed
