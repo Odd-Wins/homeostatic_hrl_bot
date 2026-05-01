@@ -37,6 +37,8 @@ setup(
             'patrol_node = homeostatic_bot.patrol_node:main',
             'battery_node = homeostatic_bot.battery_node:main',
             'docking_controller = homeostatic_bot.docking_controller:main',
+            'test_env_smoke = homeostatic_bot.test_env_smoke:main',
+            'test_homeostatic_reward = homeostatic_bot.test_homeostatic_reward:main',
         ],
     },
 )
