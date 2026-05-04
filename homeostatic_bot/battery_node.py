@@ -1,3 +1,5 @@
+"""Battery node — tracks SOC and SOH with Huang et al. (2022) capacity fade + 1/SOH power fade."""
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32, Bool
@@ -5,27 +7,43 @@ from geometry_msgs.msg import TwistStamped
 
 
 class BatteryNode(Node):
+    """Publishes /battery/soc and /battery/soh at 10 Hz; consumes /cmd_vel and /charging/detected."""
+
     def __init__(self):
         super().__init__('battery_node')
-        
-        # Battery parameters
-        self.soc = 100.0  # State of Charge (0-100%)
-        self.soh = 100.0  # State of Health (0-100%) - for degradation
-        self.max_capacity = 100.0  # Maximum capacity at 100% SOH
-        
-        # Rates
-        self.drain_rate_moving = 0.5    # % per second when moving
-        self.drain_rate_idle = 0.05     # % per second when idle
-        self.charge_rate = 2.0          # % per second when charging
-        
+
+        # Declare configurable parameters
+        self.declare_parameter('drain_rate_moving', 0.5)    # % per sec
+        self.declare_parameter('drain_rate_idle', 0.05)     # % per sec
+        self.declare_parameter('charge_rate', 2.0)          # % per sec
+        self.declare_parameter('alpha', 0.001)              # Degradation rate
+        self.declare_parameter('beta', 1.2)                 # Degradation acceleration
+        self.declare_parameter('cycle_threshold', 20.0)     # SOC % - triggers new cycle
+
+        # Get parameters
+        self.drain_rate_moving = self.get_parameter('drain_rate_moving').value
+        self.drain_rate_idle = self.get_parameter('drain_rate_idle').value
+        self.charge_rate = self.get_parameter('charge_rate').value
+        self.alpha = self.get_parameter('alpha').value
+        self.beta = self.get_parameter('beta').value
+        self.cycle_threshold = self.get_parameter('cycle_threshold').value
+
+        # Battery state
+        self.soc = 100.0          # State of Charge
+        self.soh = 100.0          # State of Health
+        self.charge_cycles = 0    # no. of completed charge cycles
+
+        # Cycle tracking
+        self.was_below_threshold = False  # Track if we dipped below threshold
+
         # State tracking
         self.is_moving = False
-        self.is_charging = False  # Now from /charging/detected topic
-        
+        self.is_charging = False
+
         # Publishers
         self.soc_publisher = self.create_publisher(Float32, '/battery/soc', 10)
         self.soh_publisher = self.create_publisher(Float32, '/battery/soh', 10)
-        
+
         # Subscribers
         self.cmd_vel_sub = self.create_subscription(
             TwistStamped,
@@ -33,19 +51,20 @@ class BatteryNode(Node):
             self.cmd_vel_callback,
             10
         )
-        
+
         self.charging_sub = self.create_subscription(
             Bool,
             '/charging/detected',
             self.charging_callback,
             10
         )
-        
+
         # Timer for battery updates (10 Hz)
         self.timer = self.create_timer(0.1, self.update_battery)
-        
+
         self.get_logger().info('Battery Node Started!')
-        self.get_logger().info('Listening for charging status on /charging/detected')
+        self.get_logger().info(f'Degradation model: SOH = 1 - {self.alpha} × n^{self.beta}')
+        self.get_logger().info(f'Cycle threshold: {self.cycle_threshold}%')
 
     def cmd_vel_callback(self, msg):
         """Check if robot is moving based on velocity commands."""
@@ -57,35 +76,58 @@ class BatteryNode(Node):
         """Update charging state from docking controller."""
         self.is_charging = msg.data
 
+    def update_soh(self):
+        """Apply Huang et al. degradation model: SOH(n) = 1 - alpha * n^beta"""
+        degradation = self.alpha * (self.charge_cycles ** self.beta)
+        self.soh = max(0.0, (1.0 - degradation) * 100.0)  # converts to percentage
+
     def update_battery(self):
         """Update battery state every 0.1 seconds."""
-        dt = 0.1  # Time step in seconds
-        
+        dt = 0.1  # Time step per seconds
+
+        # Power fade multiplier - degraded battery  drains faster
+        # at 100% soh: factor = 1.00x (baseline)
+        # at  80% soh: factor = 1.25x
+        # at  60% soh: factor = 1.67x
+        # at  40% soh: factor = 2.50x
+        soh_factor = 100.0 / max(self.soh, 1.0)
+
         if self.is_charging and self.soc < 100.0:
-            # Charging
             self.soc += self.charge_rate * dt
-            self.soc = min(self.soc, 100.0)  # Cap at 100%
+            self.soc = min(self.soc, 100.0)
             status = "CHARGING"
+
+            # Track charge cycles
+            if self.was_below_threshold and self.soc >= 99.0:
+                self.charge_cycles += 1
+                self.was_below_threshold = False
+                self.update_soh()
+                self.get_logger().info(
+                    f'Charge cycle {self.charge_cycles} complete! '
+                    f'SOH: {self.soh:.1f}%'
+                )
         elif self.is_moving:
-            # Draining (moving)
-            self.soc -= self.drain_rate_moving * dt
-            self.soc = max(self.soc, 0.0)  # Don't go below 0%
+            self.soc -= self.drain_rate_moving * soh_factor * dt
+            self.soc = max(self.soc, 0.0)
             status = "DRAINING (moving)"
         else:
-            # Draining (idle)
-            self.soc -= self.drain_rate_idle * dt
+            self.soc -= self.drain_rate_idle * soh_factor * dt
             self.soc = max(self.soc, 0.0)
             status = "DRAINING (idle)"
-        
+
+        # Tracks if soc drops below cycle threshold
+        if self.soc <= self.cycle_threshold:
+            self.was_below_threshold = True
+
         # Publish battery state
         soc_msg = Float32()
         soc_msg.data = self.soc
         self.soc_publisher.publish(soc_msg)
-        
+
         soh_msg = Float32()
         soh_msg.data = self.soh
         self.soh_publisher.publish(soh_msg)
-        
+
         # Log every 5 seconds
         if int(self.get_clock().now().nanoseconds / 1e9) % 5 == 0:
             if not hasattr(self, '_last_log_time'):
@@ -93,9 +135,12 @@ class BatteryNode(Node):
             current_time = int(self.get_clock().now().nanoseconds / 1e9)
             if current_time != self._last_log_time:
                 self._last_log_time = current_time
-                self.get_logger().info(f'SOC: {self.soc:.1f}% | SOH: {self.soh:.1f}% | {status}')
-        
-        # Warning at low battery
+                self.get_logger().info(
+                    f'SOC: {self.soc:.1f}% | SOH: {self.soh:.1f}% | '
+                    f'Cycles: {self.charge_cycles} | DrainMult: {soh_factor:.2f}x | {status}'
+                )
+
+        # law battery warning
         if self.soc <= 20.0 and self.soc > 0:
             self.get_logger().warn(f'LOW BATTERY: {self.soc:.1f}%')
         elif self.soc <= 0:
