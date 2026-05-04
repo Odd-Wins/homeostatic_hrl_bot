@@ -1,28 +1,4 @@
-"""
-env_wrapper.py — Gymnasium environment for the Homeostatic HRL thesis.
-
-Install target: ~/ros2_ws/src/homeostatic_bot/homeostatic_bot/env_wrapper.py
-
-Wraps the ROS2 + Gazebo Harmonic + TurtleBot3 Waffle simulation as a Gymnasium
-environment for RL training. Battery dynamics (SOC/SOH/charging/power fade) are
-embedded directly in this class — no separate battery_node during training.
-
-State (12D):  [x, y, yaw, lin_vel, ang_vel, SOC, SOH, lidar_f, lidar_l, lidar_r,
-               dist_to_goal, dist_to_charger]
-Action (2D):  [linear_vel (-0.26..0.26), angular_vel (-1.82..1.82)]  (Waffle spec)
-
-Design decisions (Phase 4):
- - Reset: robot teleports to (0,0); goal re-randomized within arena each episode.
- - SOH: defaults to 100% per episode. Override at eval time via
-        reset(options={"initial_soh": 60.0}).
- - Control rate: 10 Hz. step() sleeps 0.1s after publishing /cmd_vel.
- - LiDAR: 3 sectors (front ±30°, left 30..150°, right -30..-150°), min range each.
- - Charging: radius-based. If the robot is within 0.5 m of (4, 4), battery
-             charges instead of draining. No AprilTag / docking_controller during
-             training.
- - Reward: injected as a callable. Default returns 0.0 so the env can be unit-
-           tested before homeostatic_reward.py is written.
-"""
+"""Gymnasium environment wrapper for the homeostatic HRL thesis (ROS2 + Gazebo + TurtleBot3)."""
 
 import math
 import subprocess
@@ -46,25 +22,25 @@ RewardFn = Callable[[np.ndarray, np.ndarray, np.ndarray, dict], float]
 
 
 class HomeostaticBotEnv(gym.Env):
-    """Gymnasium env for the TurtleBot3 Waffle in the energy_world arena."""
+    """TurtleBot3 Waffle in energy_world — 12-D state, 2-D continuous action, 10 Hz."""
 
     metadata = {"render_modes": []}
 
-    # ---- Arena / task geometry ------------------------------------------------
+    # Arena / task geometry
     ARENA_HALF = 4.5                           # walls at ±5, keep 0.5 m buffer
     CHARGER_POS = np.array([4.0, 4.0], dtype=np.float32)
     CHARGER_RADIUS = 0.5                       # within this distance → charging
     GOAL_REACHED_RADIUS = 0.3                  # within this distance → success
 
-    # ---- Robot kinematics (TurtleBot3 Waffle spec) ---------------------------
+    # Robot kinematics (TurtleBot3 Waffle spec)
     MAX_LINEAR_VEL = 0.26
     MAX_ANGULAR_VEL = 1.82
 
-    # ---- Control / episode ----------------------------------------------------
+    # Control / episode
     CONTROL_PERIOD = 0.1                       # 10 Hz
     MAX_EPISODE_STEPS = 1200                   # 120 s @ 10 Hz
 
-    # ---- Battery constants (from Phase 3 battery_node.py) --------------------
+    # Battery constants (ported from battery_node.py — Phase 3)
     INIT_SOC = 100.0
     INIT_SOH = 100.0
     DRAIN_RATE_MOVING = 5.0                    # %/s while moving
@@ -73,9 +49,9 @@ class HomeostaticBotEnv(gym.Env):
     HUANG_ALPHA = 0.05                         # SOH(n) = 1 - α · n^β
     HUANG_BETA = 1.2
 
-    # ---- Gazebo / ROS ---------------------------------------------------------
+    # Gazebo / ROS
     WORLD_NAME = "energy_world"
-    ROBOT_NAME = "turtlebot3_waffle"                      # must match the model name in SDF
+    ROBOT_NAME = "turtlebot3_waffle"
 
     def __init__(
         self,
@@ -92,7 +68,7 @@ class HomeostaticBotEnv(gym.Env):
         if world_name is not None:
             self.WORLD_NAME = world_name
 
-        # Observation bounds. Generous — SB3 + VecNormalize don't need tight.
+        # Observation bounds — generous; SB3 + VecNormalize don't need tight.
         obs_low = np.array(
             [-5, -5, -math.pi, -1.0, -2.0, 0, 0, 0, 0, 0, 0, 0],
             dtype=np.float32,
@@ -109,15 +85,16 @@ class HomeostaticBotEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # ---- ROS2 setup -------------------------------------------------------
+        # ROS2 setup
         if not rclpy.ok():
             rclpy.init()
         self._node = Node("homeostatic_env")
+        # /cmd_vel uses TwistStamped on Gazebo Harmonic — Twist gets silently dropped.
         self._cmd_pub = self._node.create_publisher(TwistStamped, "/cmd_vel", 10)
         self._node.create_subscription(Odometry, "/odom", self._odom_cb, 10)
         self._node.create_subscription(LaserScan, "/scan", self._scan_cb, 10)
 
-        # Latest sensor state (populated by callbacks in the spin thread).
+        # Latest sensor state (populated by callbacks in the spin thread)
         self._latest_pose = None
         self._latest_twist = None
         self._latest_scan: Optional[LaserScan] = None
@@ -127,7 +104,7 @@ class HomeostaticBotEnv(gym.Env):
         self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._spin_thread.start()
 
-        # ---- Internal state ---------------------------------------------------
+        # Internal state
         self._soc = self.INIT_SOC
         self._soh = self.INIT_SOH
         self._charge_cycles = 0
@@ -138,9 +115,7 @@ class HomeostaticBotEnv(gym.Env):
 
         self._rng = np.random.default_rng(seed)
 
-    # =============================================================================
-    # ROS callbacks
-    # =============================================================================
+    # ----- ROS callbacks -------------------------------------------------------
     def _odom_cb(self, msg: Odometry) -> None:
         self._latest_pose = msg.pose.pose
         self._latest_twist = msg.twist.twist
@@ -159,15 +134,9 @@ class HomeostaticBotEnv(gym.Env):
                 )
             time.sleep(0.05)
 
-    # =============================================================================
-    # Gazebo teleport (Harmonic workaround — no native model reset)
-    # =============================================================================
+    # ----- Gazebo teleport (Harmonic workaround — no native model reset) ------
     def _teleport_robot(self, x: float, y: float, yaw: float) -> bool:
-        """Call `gz service -s /world/<world>/set_pose` to teleport the robot.
-
-        Returns True on apparent success. Silent failures here usually mean the
-        robot model name doesn't match SDF — check with `gz model --list`.
-        """
+        """Call `gz service` to teleport robot. Silent failures usually mean ROBOT_NAME mismatch."""
         qz = math.sin(yaw / 2.0)
         qw = math.cos(yaw / 2.0)
         req = (
@@ -189,9 +158,7 @@ class HomeostaticBotEnv(gym.Env):
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
-    # =============================================================================
-    # Gym API
-    # =============================================================================
+    # ----- Gym API -------------------------------------------------------------
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         if seed is not None:
@@ -200,14 +167,12 @@ class HomeostaticBotEnv(gym.Env):
         # Stop the robot first so it doesn't keep moving through the teleport.
         self._cmd_pub.publish(TwistStamped())
 
-        # Teleport back to origin. Yaw randomized so the agent doesn't overfit
-        # to a fixed starting orientation.
+        # Teleport back to origin with random yaw.
         start_yaw = float(self._rng.uniform(-math.pi, math.pi))
         ok = self._teleport_robot(0.0, 0.0, start_yaw)
         if not ok:
             self._node.get_logger().warn(
-                "Teleport call returned non-success. Continuing anyway — "
-                "check ROBOT_NAME matches the Gazebo model name."
+                "Teleport call returned non-success. Check ROBOT_NAME matches Gazebo model."
             )
         time.sleep(0.2)  # let physics settle after teleport
 
@@ -281,41 +246,36 @@ class HomeostaticBotEnv(gym.Env):
         self._prev_obs = obs.copy()
         return obs, reward, terminated, truncated, info
 
-    # =============================================================================
-    # Battery dynamics (ported from battery_node.py)
-    # =============================================================================
+    # ----- Battery dynamics (ported from battery_node.py) ---------------------
     def _tick_battery(self, lin_vel: float, ang_vel: float) -> None:
         pos = np.array([self._latest_pose.position.x, self._latest_pose.position.y])
         near_charger = float(np.linalg.norm(pos - self.CHARGER_POS)) < self.CHARGER_RADIUS
         dt = self.CONTROL_PERIOD
 
         if near_charger:
-            # Charging: SOC always refills to 100% regardless of SOH (power fade
-            # model — capacity decoupled from chargeable range).
+            # Charging: SOC always refills to 100% regardless of SOH.
             self._soc = min(self.INIT_SOC, self._soc + self.CHARGE_RATE * dt)
             # Edge-triggered cycle counter: one cycle per charger entry.
             if not self._was_charging:
                 self._charge_cycles += 1
-                # Huang et al. degradation (only if SOH wasn't clamped by eval).
+                # Huang et al. (2022) capacity fade.
                 predicted_soh = (
                     1.0 - self.HUANG_ALPHA * (self._charge_cycles ** self.HUANG_BETA)
                 ) * 100.0
+                # min() ensures SOH only ratchets down — never un-degrades during eval.
                 self._soh = max(0.0, min(self._soh, predicted_soh))
             self._was_charging = True
         else:
-            # Draining. Moving threshold matches battery_node.py convention.
+            # Draining
             moving = abs(lin_vel) > 0.01 or abs(ang_vel) > 0.01
             base_rate = self.DRAIN_RATE_MOVING if moving else self.DRAIN_RATE_IDLE
-            # Power fade: effective drain scales by 100/SOH (Cui et al. 2023,
-            # Maures et al. 2020). At SOH=40 → 2.5× drain, matching Phase 3
-            # manual test (SOH=39.4% gave DrainMult=2.54×).
+            # Power fade: drain × 100/SOH (Cui et al. 2023, Maures et al. 2020).
+            # Verified Phase 3: SOH=39.4% → 2.54× drain matched prediction.
             effective_rate = base_rate * (100.0 / self._soh) if self._soh > 1e-6 else base_rate
             self._soc = max(0.0, self._soc - effective_rate * dt)
             self._was_charging = False
 
-    # =============================================================================
-    # Observation construction
-    # =============================================================================
+    # ----- Observation construction -------------------------------------------
     def _compute_obs(self) -> np.ndarray:
         pose = self._latest_pose
         twist = self._latest_twist
@@ -324,7 +284,7 @@ class HomeostaticBotEnv(gym.Env):
         x = pose.position.x
         y = pose.position.y
         q = pose.orientation
-        # Quaternion → yaw (around z). Standard ZYX convention.
+        # Quaternion → yaw (rotation around z).
         yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y ** 2 + q.z ** 2),
@@ -349,13 +309,7 @@ class HomeostaticBotEnv(gym.Env):
 
     @staticmethod
     def _sector_mins(scan: LaserScan) -> tuple[float, float, float]:
-        """Minimum range in each of three angular sectors.
-
-        Sectors (relative to robot forward, +X):
-          front: -30°..+30°      (π/6 wide half-cone each side)
-          left:  +30°..+150°
-          right: -150°..-30°
-        """
+        """Min range per sector: front ±30°, left 30..150°, right -30..-150°."""
         ranges = np.array(scan.ranges, dtype=np.float32)
         ranges[~np.isfinite(ranges)] = scan.range_max
         ranges = np.clip(ranges, scan.range_min, scan.range_max)
@@ -374,9 +328,7 @@ class HomeostaticBotEnv(gym.Env):
 
         return _min(front_mask), _min(left_mask), _min(right_mask)
 
-    # =============================================================================
-    # Cleanup
-    # =============================================================================
+    # ----- Cleanup -------------------------------------------------------------
     def close(self) -> None:
         try:
             self._cmd_pub.publish(TwistStamped())  # stop the robot

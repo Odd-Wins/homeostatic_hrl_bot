@@ -1,19 +1,4 @@
-"""
-test_env_smoke.py — Minimal smoke test for HomeostaticBotEnv.
-
-Install target: ~/ros2_ws/src/homeostatic_bot/homeostatic_bot/test_env_smoke.py
-
-Purpose: verify the env plumbing works end-to-end BEFORE adding reward shaping
-or TD3. Runs 50 random-action steps, prints state every 10 steps, and sanity-
-checks that sensors, teleport, battery drain, and termination are all wired up.
-
-Run this with Gazebo already launched. Expected behavior:
- - Robot teleports to origin, then wiggles randomly for ~5 seconds
- - SOC decreases each step (not charging unless it randomly wanders to 4,4)
- - Episode either terminates (reached goal / battery dead) or truncates at 1200
-
-If this passes, the env is ready to receive a reward function.
-"""
+"""End-to-end smoke test for HomeostaticBotEnv (requires Gazebo running)."""
 
 import numpy as np
 
@@ -36,7 +21,6 @@ def main():
     print(f"[reset] initial obs = {np.round(obs, 3)}")
 
     assert obs.shape == (12,), f"Expected 12-D observation, got {obs.shape}"
-    assert env.observation_space.contains(obs) or True, "Observation outside bounds (warn only)"
 
     total_reward = 0.0
     for step in range(50):
@@ -72,11 +56,10 @@ def main():
     print(f"[reset] initial SOH = {info['initial_soh']}% (expected 60.0)")
     assert abs(info["initial_soh"] - 60.0) < 1e-6, "SOH override failed"
 
-    # Take one step, confirm power fade is active (drain should be ~1.67× faster)
-    soc_before = info.get("soc", 100.0)
+    # One step at SOH=60%, confirm power fade gives ~1.67× drain.
     _, _, _, _, info2 = env.step(np.array([0.26, 0.0], dtype=np.float32))
     soc_drop = 100.0 - info2["soc"]
-    expected_drop = 5.0 * (100.0 / 60.0) * 0.1   # base_rate × power_fade × dt
+    expected_drop = 5.0 * (100.0 / 60.0) * 0.1   # base × power_fade × dt
     print(f"[power fade] SOC drop in 1 step at SOH=60%: {soc_drop:.4f}% "
           f"(expected ~{expected_drop:.4f}%)")
 
