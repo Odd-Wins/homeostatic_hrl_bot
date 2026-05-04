@@ -1,51 +1,4 @@
-"""
-homeostatic_reward.py — Drive-reduction reward for the homeostatic HRL thesis.
-
-Install target: ~/ros2_ws/src/homeostatic_bot/homeostatic_bot/homeostatic_reward.py
-
-Implements the Keramati & Gutkin (2014) homeostatic reinforcement learning
-framework as the *dominant* learning signal, with sparse task bonuses and
-guardrail penalties.
-
-DESIGN PRINCIPLE
-    The agent receives reward each step based on how its action moved the
-    battery state of charge (SOC) toward or away from a homeostatic setpoint.
-    Drive is defined as |SOC - setpoint|; reward is the negative change in
-    drive across one step. When SOC moves toward setpoint, drive decreases
-    and reward is positive. This produces energy-aware behavior without
-    engineered "go charge when below threshold X" rules.
-
-REWARD COMPONENTS
-    Homeostatic drive:  drive_before - drive_after          Keramati & Gutkin (2014)
-    Goal reached:       +10                                 Yoshida et al. (2024),
-                                                            Bouhamed et al. (2020)
-    Battery death:      -10                                 Ramezani & Atashgah (2024)
-    Step cost:          -0.1                                Henderson et al. (2018),
-                                                            Imanberdiyev et al. (2016)
-    Collision penalty:  -5  (lidar sector min < 0.25 m)     Raj & Kos (2024)
-
-SETPOINT CHOICE: 80% SOC
-    Three justifications for the defense:
-      1. Keramati & Gutkin (2014) literature default — direct framework match.
-      2. IEC 61960 end-of-life threshold (70-80% capacity) — physical meaning.
-      3. Hospital-robot framing — 30% buffer above the ~50% danger zone where
-         power-fade multiplier seriously impacts mission range.
-
-IMPORTANT — DOMINANCE OF DRIVE
-    The homeostatic drive is intended to be the *dominant* learning signal.
-    Sparse bonuses are guardrails. If during training the agent ignores the
-    drive and chases the +10 goal bonus, REDUCE the sparse rewards rather
-    than scaling up the drive — the thesis claim depends on drive-reduction
-    generating energy-aware behavior without engineered reward shaping.
-
-OBSERVATION INDICES (synced with env_wrapper.HomeostaticBotEnv._compute_obs)
-    [0,1,2]   x, y, yaw
-    [3,4]     linear_vel, angular_vel
-    [5]       SOC
-    [6]       SOH
-    [7,8,9]   lidar_front, lidar_left, lidar_right
-    [10,11]   dist_to_goal, dist_to_charger
-"""
+"""Drive-reduction reward for the homeostatic HRL thesis (Keramati & Gutkin 2014)."""
 
 from dataclasses import dataclass
 
@@ -61,61 +14,37 @@ _IDX_LIDAR_RIGHT = 9
 
 @dataclass
 class HomeostaticReward:
-    """Keramati & Gutkin (2014) drive-reduction reward with sparse guardrails.
+    """Drive-reduction + sparse guardrails. Plug into HomeostaticBotEnv as reward_fn."""
 
-    Implemented as a dataclass so weights can be reconfigured without
-    rewriting the function — useful for Phase 6 ablation studies (e.g.,
-    disable collision penalty by setting collision_penalty=0 to isolate
-    its contribution to learned behavior).
-
-    Attributes:
-        setpoint: Homeostatic SOC target (%).
-        goal_bonus: Reward added when info["reached_goal"] is True.
-        death_penalty: Reward subtracted when info["battery_dead"] is True.
-        step_cost: Reward subtracted every step (encourages efficiency).
-        collision_penalty: Reward subtracted while any lidar sector min is
-            below collision_threshold.
-        collision_threshold: Distance (m) below which a sector counts as a
-            near-collision. 0.25 m gives ~11 cm clearance from the Waffle's
-            ~14 cm body radius.
-    """
-
+    # Setpoint: 80% — Keramati & Gutkin (2014) literature default.
+    # Also matches IEC 61960 EOL threshold (70-80%) and gives 30% buffer above
+    # the ~50% danger zone where power fade seriously impacts mission range.
     setpoint: float = 80.0
 
-    goal_bonus: float = 10.0
-    death_penalty: float = 10.0
+    # Sparse bonuses — kept small so the homeostatic drive stays dominant.
+    goal_bonus: float = 10.0           # Yoshida et al. (2024), Bouhamed et al. (2020)
+    death_penalty: float = 10.0        # Ramezani & Atashgah (2024)
 
-    step_cost: float = 0.1
-    collision_penalty: float = 1.0
-    collision_threshold: float = 0.25
+    # Per-step terms.
+    step_cost: float = 0.1             # Henderson et al. (2018), Imanberdiyev et al. (2016)
+    collision_penalty: float = 1.0     # Raj & Kos (2024), tuned from -5 → -1 to match
+                                       # goal magnitude per second at 10 Hz control rate.
+    collision_threshold: float = 0.25  # ~11 cm clearance from Waffle's ~14 cm body.
 
-    def __call__(
-        self,
-        prev_obs: np.ndarray,
-        action: np.ndarray,
-        next_obs: np.ndarray,
-        info: dict,
-    ) -> float:
-        """Compute reward for one (s, a, s') transition.
+    def __call__(self, prev_obs, action, next_obs, info):
+        """Compute reward for one (s, a, s') transition."""
 
-        Conforms to env_wrapper.RewardFn signature so it can be passed
-        directly: HomeostaticBotEnv(reward_fn=HomeostaticReward()).
-        """
-
-        # 1. Homeostatic drive-reduction — the dominant signal.
-        #    Positive when SOC moves toward setpoint, negative when away.
+        # 1. Homeostatic drive-reduction — dominant signal.
+        # Positive when SOC moves toward setpoint, negative when away.
         drive_before = abs(prev_obs[_IDX_SOC] - self.setpoint)
         drive_after = abs(next_obs[_IDX_SOC] - self.setpoint)
         reward = drive_before - drive_after
 
-        # 2. Step cost — applied every step, including terminal steps.
-        #    At max episode length (1200 steps): -120 cumulative.
+        # 2. Step cost (every step).
         reward -= self.step_cost
 
-        # 3. Collision penalty — per-step while in the danger zone.
-        #    Per-step (not edge-triggered) matches Raj & Kos (2024) dense
-        #    formulation. If agent becomes overcautious in training, switch
-        #    to edge-triggered or lower magnitude.
+        # 3. Collision penalty — per-step while in danger zone.
+        # Per-step (not edge-triggered) matches Raj & Kos dense formulation.
         lidar_min = min(
             next_obs[_IDX_LIDAR_FRONT],
             next_obs[_IDX_LIDAR_LEFT],
@@ -134,5 +63,5 @@ class HomeostaticReward:
 
 
 def make_default_reward() -> HomeostaticReward:
-    """Construct the default reward for Phase 4 flat TD3 baseline."""
+    """Default reward for the Phase 4 flat TD3 baseline."""
     return HomeostaticReward()
