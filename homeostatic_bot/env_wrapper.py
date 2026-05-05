@@ -14,6 +14,8 @@ from geometry_msgs.msg import Twist, TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import LaserScan
 
 
@@ -27,31 +29,35 @@ class HomeostaticBotEnv(gym.Env):
     metadata = {"render_modes": []}
 
     # Arena / task geometry
-    ARENA_HALF = 4.5                           # walls at ±5, keep 0.5 m buffer
+    ARENA_HALF = 4.5
     CHARGER_POS = np.array([4.0, 4.0], dtype=np.float32)
-    CHARGER_RADIUS = 0.5                       # within this distance → charging
-    GOAL_REACHED_RADIUS = 0.3                  # within this distance → success
+    CHARGER_RADIUS = 0.5
+    GOAL_REACHED_RADIUS = 0.3
 
     # Robot kinematics (TurtleBot3 Waffle spec)
     MAX_LINEAR_VEL = 0.26
     MAX_ANGULAR_VEL = 1.82
 
     # Control / episode
-    CONTROL_PERIOD = 0.1                       # 10 Hz
+    CONTROL_PERIOD = 0.1                       # 10 Hz (sim-time)
     MAX_EPISODE_STEPS = 1200                   # 120 s @ 10 Hz
 
-    # Battery constants (ported from battery_node.py — Phase 3)
+    # Battery constants (smoke-test defaults — override in main() for policy eval/training)
     INIT_SOC = 100.0
     INIT_SOH = 100.0
-    DRAIN_RATE_MOVING = 5.0                    # %/s while moving
-    DRAIN_RATE_IDLE = 0.01                     # %/s while idle
-    CHARGE_RATE = 10.0                         # %/s while on charger
-    HUANG_ALPHA = 0.05                         # SOH(n) = 1 - α · n^β
+    DRAIN_RATE_MOVING = 5.0
+    DRAIN_RATE_IDLE = 0.01
+    CHARGE_RATE = 10.0
+    HUANG_ALPHA = 0.05
     HUANG_BETA = 1.2
 
     # Gazebo / ROS
     WORLD_NAME = "energy_world"
     ROBOT_NAME = "turtlebot3_waffle"
+
+    # Sim-time fallback: if /clock doesn't publish within this many seconds,
+    # fall back to wall-clock sleep so the env still works.
+    CLOCK_TIMEOUT_S = 3.0
 
     def __init__(
         self,
@@ -68,7 +74,6 @@ class HomeostaticBotEnv(gym.Env):
         if world_name is not None:
             self.WORLD_NAME = world_name
 
-        # Observation bounds — generous; SB3 + VecNormalize don't need tight.
         obs_low = np.array(
             [-5, -5, -math.pi, -1.0, -2.0, 0, 0, 0, 0, 0, 0, 0],
             dtype=np.float32,
@@ -89,15 +94,29 @@ class HomeostaticBotEnv(gym.Env):
         if not rclpy.ok():
             rclpy.init()
         self._node = Node("homeostatic_env")
+
         # /cmd_vel uses TwistStamped on Gazebo Harmonic — Twist gets silently dropped.
         self._cmd_pub = self._node.create_publisher(TwistStamped, "/cmd_vel", 10)
-        self._node.create_subscription(Odometry, "/odom", self._odom_cb, 10)
-        self._node.create_subscription(LaserScan, "/scan", self._scan_cb, 10)
+
+        # BEST_EFFORT + depth 1 for sensor topics: drop stale messages, always read latest.
+        # /odom publishes ~93 Hz on Harmonic; we step at 10 Hz, so reliable QoS would
+        # queue ~9 stale messages per step.
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self._node.create_subscription(Odometry, "/odom", self._odom_cb, sensor_qos)
+        self._node.create_subscription(LaserScan, "/scan", self._scan_cb, sensor_qos)
+
+        # /clock subscription enables sim-time sync. Same BEST_EFFORT + depth 1 pattern.
+        self._node.create_subscription(Clock, "/clock", self._clock_cb, sensor_qos)
 
         # Latest sensor state (populated by callbacks in the spin thread)
         self._latest_pose = None
         self._latest_twist = None
         self._latest_scan: Optional[LaserScan] = None
+        self._latest_sim_time: Optional[float] = None       # seconds since sim epoch
 
         self._executor = MultiThreadedExecutor()
         self._executor.add_node(self._node)
@@ -108,12 +127,15 @@ class HomeostaticBotEnv(gym.Env):
         self._soc = self.INIT_SOC
         self._soh = self.INIT_SOH
         self._charge_cycles = 0
-        self._was_charging = False                # edge detection for cycle count
+        self._was_charging = False
         self._goal = np.zeros(2, dtype=np.float32)
         self._step_count = 0
         self._prev_obs: Optional[np.ndarray] = None
 
         self._rng = np.random.default_rng(seed)
+
+        # Sim-time vs wall-time choice — set once at first step.
+        self._use_sim_time: Optional[bool] = None
 
     # ----- ROS callbacks -------------------------------------------------------
     def _odom_cb(self, msg: Odometry) -> None:
@@ -122,6 +144,10 @@ class HomeostaticBotEnv(gym.Env):
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._latest_scan = msg
+
+    def _clock_cb(self, msg: Clock) -> None:
+        # Convert builtin_interfaces/Time to seconds as float.
+        self._latest_sim_time = msg.clock.sec + msg.clock.nanosec * 1e-9
 
     def _wait_for_sensors(self, timeout: float = 5.0) -> None:
         """Block until /odom and /scan have each produced at least one message."""
@@ -133,6 +159,43 @@ class HomeostaticBotEnv(gym.Env):
                     "and is the TurtleBot3 spawned? Check `ros2 topic list`."
                 )
             time.sleep(0.05)
+
+    def _decide_clock_source(self) -> None:
+        """On first step, decide whether to use sim-time or wall-time."""
+        if self._use_sim_time is not None:
+            return
+        # Wait briefly for first /clock message.
+        start = time.time()
+        while self._latest_sim_time is None and (time.time() - start) < self.CLOCK_TIMEOUT_S:
+            time.sleep(0.05)
+        self._use_sim_time = self._latest_sim_time is not None
+        if self._use_sim_time:
+            self._node.get_logger().info(
+                "Using /clock for sim-time sync. Gazebo can run faster than real-time."
+            )
+        else:
+            self._node.get_logger().warn(
+                "/clock not publishing — falling back to wall-clock sleep. "
+                "Training will be capped at real-time. Check that Gazebo is running "
+                "and use_sim_time bridge is enabled."
+            )
+
+    def _wait_one_period(self) -> None:
+        """Wait for one CONTROL_PERIOD to elapse — sim-time if available, else wall-time."""
+        if self._use_sim_time:
+            target_time = self._latest_sim_time + self.CONTROL_PERIOD
+            # Poll until sim-time advances. Guard against infinite waits via wall-clock cap.
+            wall_start = time.time()
+            while self._latest_sim_time < target_time:
+                if time.time() - wall_start > 5.0:
+                    self._node.get_logger().warn(
+                        "Sim-time not advancing — Gazebo may be paused. Falling back to sleep."
+                    )
+                    time.sleep(self.CONTROL_PERIOD)
+                    return
+                time.sleep(0.001)   # 1 ms polling — tight loop without burning CPU
+        else:
+            time.sleep(self.CONTROL_PERIOD)
 
     # ----- Gazebo teleport (Harmonic workaround — no native model reset) ------
     def _teleport_robot(self, x: float, y: float, yaw: float) -> bool:
@@ -164,17 +227,15 @@ class HomeostaticBotEnv(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
-        # Stop the robot first so it doesn't keep moving through the teleport.
         self._cmd_pub.publish(TwistStamped())
 
-        # Teleport back to origin with random yaw.
         start_yaw = float(self._rng.uniform(-math.pi, math.pi))
         ok = self._teleport_robot(0.0, 0.0, start_yaw)
         if not ok:
             self._node.get_logger().warn(
                 "Teleport call returned non-success. Check ROBOT_NAME matches Gazebo model."
             )
-        time.sleep(0.2)  # let physics settle after teleport
+        time.sleep(0.2)  # let physics settle after teleport (always wall-clock — small)
 
         # Sample goal inside arena, away from start and charger.
         for _ in range(50):
@@ -195,9 +256,17 @@ class HomeostaticBotEnv(gym.Env):
         self._step_count = 0
 
         self._wait_for_sensors()
+        # Decide sim-time vs wall-time on first reset (or first step) so smoke
+        # test users see the message early.
+        self._decide_clock_source()
+
         obs = self._compute_obs()
         self._prev_obs = obs.copy()
-        info = {"goal": self._goal.copy(), "initial_soh": self._soh}
+        info = {
+            "goal": self._goal.copy(),
+            "initial_soh": self._soh,
+            "use_sim_time": self._use_sim_time,
+        }
         return obs, info
 
     def step(self, action: np.ndarray):
@@ -209,8 +278,8 @@ class HomeostaticBotEnv(gym.Env):
         twist.twist.angular.z = float(np.clip(action[1], -self.MAX_ANGULAR_VEL, self.MAX_ANGULAR_VEL))
         self._cmd_pub.publish(twist)
 
-        # 2. Wait one control period for physics + sensors to advance
-        time.sleep(self.CONTROL_PERIOD)
+        # 2. Wait one control period (sim-time if available — gives Gazebo speedup)
+        self._wait_one_period()
 
         # 3. Update battery given the action we just took
         self._tick_battery(twist.twist.linear.x, twist.twist.angular.z)
@@ -226,8 +295,8 @@ class HomeostaticBotEnv(gym.Env):
         battery_dead = self._soc <= 0.0
         time_limit = self._step_count >= self.MAX_EPISODE_STEPS
 
-        terminated = bool(reached_goal or battery_dead)   # task-terminal
-        truncated = bool(time_limit and not terminated)   # time-limit only
+        terminated = bool(reached_goal or battery_dead)
+        truncated = bool(time_limit and not terminated)
 
         info = {
             "soc": self._soc,
@@ -240,7 +309,6 @@ class HomeostaticBotEnv(gym.Env):
             "step_count": self._step_count,
         }
 
-        # 5. Compute reward via injected function
         reward = float(self._reward_fn(self._prev_obs, np.asarray(action), obs, info))
 
         self._prev_obs = obs.copy()
@@ -253,24 +321,17 @@ class HomeostaticBotEnv(gym.Env):
         dt = self.CONTROL_PERIOD
 
         if near_charger:
-            # Charging: SOC always refills to 100% regardless of SOH.
             self._soc = min(self.INIT_SOC, self._soc + self.CHARGE_RATE * dt)
-            # Edge-triggered cycle counter: one cycle per charger entry.
             if not self._was_charging:
                 self._charge_cycles += 1
-                # Huang et al. (2022) capacity fade.
                 predicted_soh = (
                     1.0 - self.HUANG_ALPHA * (self._charge_cycles ** self.HUANG_BETA)
                 ) * 100.0
-                # min() ensures SOH only ratchets down — never un-degrades during eval.
                 self._soh = max(0.0, min(self._soh, predicted_soh))
             self._was_charging = True
         else:
-            # Draining
             moving = abs(lin_vel) > 0.01 or abs(ang_vel) > 0.01
             base_rate = self.DRAIN_RATE_MOVING if moving else self.DRAIN_RATE_IDLE
-            # Power fade: drain × 100/SOH (Cui et al. 2023, Maures et al. 2020).
-            # Verified Phase 3: SOH=39.4% → 2.54× drain matched prediction.
             effective_rate = base_rate * (100.0 / self._soh) if self._soh > 1e-6 else base_rate
             self._soc = max(0.0, self._soc - effective_rate * dt)
             self._was_charging = False
@@ -284,7 +345,6 @@ class HomeostaticBotEnv(gym.Env):
         x = pose.position.x
         y = pose.position.y
         q = pose.orientation
-        # Quaternion → yaw (rotation around z).
         yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y ** 2 + q.z ** 2),
@@ -316,7 +376,6 @@ class HomeostaticBotEnv(gym.Env):
 
         n = len(ranges)
         angles = scan.angle_min + np.arange(n) * scan.angle_increment
-        # Wrap to [-π, π]
         angles = ((angles + math.pi) % (2 * math.pi)) - math.pi
 
         front_mask = (angles >= -math.pi / 6) & (angles <= math.pi / 6)
@@ -331,7 +390,7 @@ class HomeostaticBotEnv(gym.Env):
     # ----- Cleanup -------------------------------------------------------------
     def close(self) -> None:
         try:
-            self._cmd_pub.publish(TwistStamped())  # stop the robot
+            self._cmd_pub.publish(TwistStamped())
         except Exception:
             pass
         try:
