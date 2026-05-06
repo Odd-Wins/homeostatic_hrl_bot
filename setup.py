@@ -39,6 +39,8 @@ setup(
             'docking_controller = homeostatic_bot.docking_controller:main',
             'test_env_smoke = homeostatic_bot.test_env_smoke:main',
             'test_homeostatic_reward = homeostatic_bot.test_homeostatic_reward:main',
+            'threshold_baseline = homeostatic_bot.threshold_baseline:main',
+            'train_flat = homeostatic_bot.train_flat:main', 
         ],
     },
 )
