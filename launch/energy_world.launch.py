@@ -28,7 +28,7 @@ def generate_launch_description():
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
         ),
         launch_arguments={
-            'gz_args': f'-r -v2 {world_file}',
+            'gz_args': f'-r -v2 -s {world_file}',
             'on_exit_shutdown': 'true'
         }.items()
     )
@@ -57,31 +57,28 @@ def generate_launch_description():
         launch_arguments={'use_sim_time': 'true'}.items()
     )
     
-    # Image bridge (Gazebo camera → ROS2)
-    image_bridge = Node(
-        package='ros_gz_image',
-        executable='image_bridge',
-        arguments=['/camera/image_raw'],
-        output='screen',
-        parameters=[{'use_sim_time': True}],
-    )
-    
-    # Parameter bridge (camera_info and other topics)
-    parameter_bridge = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=[
-            '/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
-        ],
-        output='screen',
-        parameters=[{'use_sim_time': True}],
-    )
-    
+    # Camera bridges disabled — Sensors plugin (ogre2) is off for headless training.
+    # Re-enable for AprilTag / visual servoing deployment:
+    # image_bridge = Node(
+    #     package='ros_gz_image',
+    #     executable='image_bridge',
+    #     arguments=['/camera/image_raw'],
+    #     output='screen',
+    #     parameters=[{'use_sim_time': True}],
+    # )
+    # parameter_bridge = Node(
+    #     package='ros_gz_bridge',
+    #     executable='parameter_bridge',
+    #     arguments=[
+    #         '/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
+    #     ],
+    #     output='screen',
+    #     parameters=[{'use_sim_time': True}],
+    # )
+
     return LaunchDescription([
         gz_resource_path,
         gazebo,
         spawn_robot,
         robot_state_publisher,
-        image_bridge,
-        parameter_bridge,
     ])

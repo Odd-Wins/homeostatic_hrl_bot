@@ -3,8 +3,8 @@
   <world name="energy_world">
     
     <!-- Physics -->
-    <physics name="1ms" type="ignored">
-      <max_step_size>0.001</max_step_size>
+    <physics name="2ms" type="ignored">
+      <max_step_size>0.002</max_step_size>
       <real_time_factor>0</real_time_factor>
       <real_time_update_rate>0</real_time_update_rate>
     </physics>
@@ -13,6 +13,9 @@
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <!-- Sensors plugin required for LiDAR simulation. Using ogre2 but with
+         camera disabled on the robot model to minimise render thread load
+         during headless training. -->
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>

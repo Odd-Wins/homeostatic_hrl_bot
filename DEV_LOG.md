@@ -27,13 +27,14 @@
 
 --------------------------------
 
-## Week 3: Energy Simulation
+## Week 3 -4 : Energy Simulation
 **Date:** [March 10]
 
 ### What I Did
 - Created battery_node.py
 - Simulates SOC drain when moving
 - Simulates charging at charging station
+- Updated battery_node for detection busing AR tag
 
 ### Decisions Made
 - Used ROS2 battery node instead of LinearBatteryPlugin

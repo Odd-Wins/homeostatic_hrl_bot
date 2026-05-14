@@ -18,6 +18,10 @@ setup(
         # Include world files
         (os.path.join('share', package_name, 'worlds'), 
             glob('worlds/*.sdf')),
+        # Include TurtleBot3 Waffle model (camera disabled for headless training)
+        (os.path.join('share', package_name, 'models', 'turtlebot3_waffle'),
+            ['models/turtlebot3_waffle/model.config',
+             'models/turtlebot3_waffle/model.sdf']),
         # Include AprilTag model
         (os.path.join('share', package_name, 'models', 'apriltag_0'),
             ['models/apriltag_0/model.config',
@@ -40,7 +44,9 @@ setup(
             'test_env_smoke = homeostatic_bot.test_env_smoke:main',
             'test_homeostatic_reward = homeostatic_bot.test_homeostatic_reward:main',
             'threshold_baseline = homeostatic_bot.threshold_baseline:main',
-            'train_flat = homeostatic_bot.train_flat:main', 
+            'train_flat = homeostatic_bot.train_flat:main',
+            'train_hrl = homeostatic_bot.train_hrl:main',
+            'eval_hrl = homeostatic_bot.eval_hrl:main',
         ],
     },
 )

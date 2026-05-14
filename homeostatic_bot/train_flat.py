@@ -1,4 +1,4 @@
-"""TD3 training script for the flat homeostatic baseline (Phase 4)."""
+"""TD3 + HER training script for the flat homeostatic baseline (Phase 4)."""
 
 from datetime import datetime
 from pathlib import Path
@@ -8,91 +8,94 @@ from stable_baselines3 import TD3
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.noise import NormalActionNoise
+from stable_baselines3.her.her_replay_buffer import HerReplayBuffer
 
 from homeostatic_bot.env_wrapper import HomeostaticBotEnv
-from homeostatic_bot.homeostatic_reward import HomeostaticReward
 
 
 # =============================================================================
-# CONFIG - change TOTAL_TIMESTEPS to scale from validation to full training.
+# CONFIG
 # =============================================================================
 
-# Training duration. Default = quick smoke test to validate code end-to-end.
-# After confirming the smoke test learns *something* (rollout reward trends up),
-# change to 500_000 for the full Phase 4 baseline run.
-TOTAL_TIMESTEPS = 500_000          # SMOKE TEST - will change to 500_000 for full run
+# Smoke test default for HER implementation, first ran on 50k timesteps and 10k chekpnt 
+
+TOTAL_TIMESTEPS = 500_000
+CHECKPOINT_FREQ = 50_000
 SEED = 42
 
-# Checkpoint cadence. Smoke-test default saves at 5k for visibility.
-# For full run, set to 50_000.
-CHECKPOINT_FREQ = 50_000           # SMOKE TEST - will change to 50_000 for full run
-
-# Battery rates - slow values for policy evaluation, same as threshold baseline.
-# Gives ~200s mission time at SOH=100, room for the agent to learn navigation
-# AND charging behavior without immediate survival pressure.
+# Battery rates — slow values for policy evaluation.
 DRAIN_RATE_MOVING = 0.5
 DRAIN_RATE_IDLE = 0.005
 CHARGE_RATE = 2.0
 
+# === Option C: relaxed flat-baseline task ===
+# Cardinal-direction goals with clear straight-line paths from spawn, larger goal radius.
+# Asymmetric protocol: only the flat baseline uses these; threshold and HRL keep
+# methodology defaults (random goals at 0.3 m radius). Rationale and defense framing
+# documented in Phase4_Implementation_Manual_Supplement2.md § 5.
+USE_OPTION_C = True
+
+if USE_OPTION_C:
+    GOAL_RADIUS = 0.5
+    GOAL_SET = [
+        (3.0, 0.0),    # east of spawn — clear straight-line path
+        (-3.0, 0.0),   # west of spawn — clear straight-line path
+        (1.5, 3.0),    # north (offset from (0, 3) to clear obstacle 1 at (0, 2))
+        (0.0, -3.0),   # south of spawn — clear straight-line path
+    ]
+else:
+    GOAL_RADIUS = 0.3   # methodology default
+    GOAL_SET = None     # random sampling per methodology (Section 1.3)
+
 # TD3 hyperparameters (Fujimoto et al. 2018 + SB3 defaults).
-LEARNING_RATE = 3e-4              # SB3 default
-BUFFER_SIZE = 100_000             # smaller than SB3's 1M default - adequate for 500k training
-BATCH_SIZE = 256                  # SB3 default
-GAMMA = 0.99                      # discount factor -  standard for episodic tasks
-TAU = 0.005                       # target network soft-update rate
-LEARNING_STARTS = 25_000          # pure random actions before training (warmup)
-TRAIN_FREQ = 1                    # train after every env step
-GRADIENT_STEPS = 1                # gradient steps per training call
-POLICY_DELAY = 2                  # actor updates lag critic by 2 - TD3 signature
+LEARNING_RATE = 3e-4
+BUFFER_SIZE = 100_000
+BATCH_SIZE = 256
+GAMMA = 0.99
+TAU = 0.005
+LEARNING_STARTS = 25_000
+TRAIN_FREQ = 1
+GRADIENT_STEPS = 1
+POLICY_DELAY = 2
 
-# Action noise - Gaussian, scaled to 10% of action range per dimension.
-# Action space is asymmetric ([-0.26, 0.26] linear, [-1.82, 1.82] angular)
-# so a single sigma would over-noise the small-magnitude action.
-ACTION_NOISE_SIGMA_FRACTION = 0.1
-
-# Network architecture -  TD3 paper default ([400, 300] for both actor and critic).
+ACTION_NOISE_SIGMA_FRACTION = 0.2 # was 0.1
 NET_ARCH = [400, 300]
+
+# HER hyperparameters (Andrychowicz et al. 2017).
+N_SAMPLED_GOAL = 4                         # number of relabeled goals per real goal
+GOAL_SELECTION_STRATEGY = "future"         # most common HER strategy
 
 
 def main():
-    # -------------------------------------------------------------------------
-    # 1. Set up output directories. Logs live outside the repo at
-    #    ~/thesis_logs/flat_td3/<timestamp>/
-    # -------------------------------------------------------------------------
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_root = Path.home() / "thesis_logs" / "flat_td3" / timestamp
+    log_root = Path.home() / "thesis_logs" / "flat_td3_her" / timestamp
     log_root.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = log_root / "checkpoints"
     checkpoint_dir.mkdir(exist_ok=True)
     tb_dir = log_root / "tensorboard"
 
-    # -------------------------------------------------------------------------
-    # 2. Create env with policy-evaluation drain rates.
-    # -------------------------------------------------------------------------
-    env = HomeostaticBotEnv(reward_fn=HomeostaticReward(), seed=SEED)
+    # Goal-conditioned env (returns Dict obs and implements compute_reward()).
+    env = HomeostaticBotEnv(seed=SEED, goal_conditioned=True)
     env.DRAIN_RATE_MOVING = DRAIN_RATE_MOVING
     env.DRAIN_RATE_IDLE = DRAIN_RATE_IDLE
     env.CHARGE_RATE = CHARGE_RATE
+    env.GOAL_REACHED_RADIUS = GOAL_RADIUS
+    env.GOAL_SET = GOAL_SET
 
-    # Monitor wrapper records (episode_reward, episode_length) to a CSV
-    # at <log_root>/monitor.csv. SB3 also uses this for TensorBoard logging.
     env = Monitor(env, filename=str(log_root / "monitor"))
 
-    # -------------------------------------------------------------------------
-    # 3. Action noise-  Gaussian, scaled per-dimension to the action range.
-    # -------------------------------------------------------------------------
-    action_high = env.action_space.high                       # [0.26, 1.82]
+    # Action noise — Gaussian, scaled per-dimension to action range.
+    action_high = env.action_space.high
     action_noise = NormalActionNoise(
         mean=np.zeros_like(action_high),
-        sigma=ACTION_NOISE_SIGMA_FRACTION * action_high,      # [0.026, 0.182]
+        sigma=ACTION_NOISE_SIGMA_FRACTION * action_high,
     )
 
-    # -------------------------------------------------------------------------
-    # 4. Create TD3 model.
-    # -------------------------------------------------------------------------
     policy_kwargs = dict(net_arch=NET_ARCH)
+
+    # MultiInputPolicy is required for Dict observation spaces (i.e. goal-conditioned).
     model = TD3(
-        policy="MlpPolicy",
+        policy="MultiInputPolicy",
         env=env,
         learning_rate=LEARNING_RATE,
         buffer_size=BUFFER_SIZE,
@@ -105,56 +108,52 @@ def main():
         policy_delay=POLICY_DELAY,
         action_noise=action_noise,
         policy_kwargs=policy_kwargs,
+        replay_buffer_class=HerReplayBuffer,
+        replay_buffer_kwargs=dict(
+            n_sampled_goal=N_SAMPLED_GOAL,
+            goal_selection_strategy=GOAL_SELECTION_STRATEGY,
+        ),
         seed=SEED,
         verbose=1,
         tensorboard_log=str(tb_dir),
     )
 
-    # -------------------------------------------------------------------------
-    # 5. Banner + run summary.
-    # -------------------------------------------------------------------------
     print(f"\n{'=' * 70}")
-    print(f"TD3 Training — Flat Homeostatic Baseline")
+    print(f"TD3 + HER Training — Flat Homeostatic Baseline")
     print(f"{'=' * 70}")
     print(f"Log dir:         {log_root}")
     print(f"Total timesteps: {TOTAL_TIMESTEPS:,}")
-    print(f"Checkpoints:     every {CHECKPOINT_FREQ:,} steps → {checkpoint_dir}")
+    print(f"Checkpoints:     every {CHECKPOINT_FREQ:,} steps")
     print(f"Seed:            {SEED}")
     print(f"Device:          {model.device}")
     print(f"Battery rates:   drain={DRAIN_RATE_MOVING}/{DRAIN_RATE_IDLE} %/s, charge={CHARGE_RATE} %/s")
+    print(f"Option C:        {USE_OPTION_C}, goal radius={GOAL_RADIUS} m")
+    if GOAL_SET is None:
+        print(f"Goal sampling:   random uniform with rejection (methodology default)")
+    else:
+        print(f"Goal set:        {GOAL_SET}")
     print(f"Network:         {NET_ARCH}, lr={LEARNING_RATE}, batch={BATCH_SIZE}")
+    print(f"HER:             n_sampled_goal={N_SAMPLED_GOAL}, strategy={GOAL_SELECTION_STRATEGY}")
     print(f"TensorBoard:     run `tensorboard --logdir {tb_dir}` in another terminal")
     print(f"{'=' * 70}\n")
 
-    # -------------------------------------------------------------------------
-    # 6. Periodic checkpointing - saves the model every CHECKPOINT_FREQ steps.
-    #    save_replay_buffer=False because the buffer is huge and not needed
-    #    for inference / evaluation.
-    # -------------------------------------------------------------------------
     checkpoint_cb = CheckpointCallback(
         save_freq=CHECKPOINT_FREQ,
         save_path=str(checkpoint_dir),
-        name_prefix="td3_homeo",
+        name_prefix="td3_her",
         save_replay_buffer=False,
         save_vecnormalize=False,
     )
 
-    # -------------------------------------------------------------------------
-    # 7. TRAIN. KeyboardInterrupt is caught so a Ctrl-C still saves the model.
-    # -------------------------------------------------------------------------
     try:
         model.learn(
             total_timesteps=TOTAL_TIMESTEPS,
             callback=checkpoint_cb,
-            log_interval=10,                      # log every 10 episodes to console+TB
-            progress_bar=True
+            log_interval=10,
         )
     except KeyboardInterrupt:
         print("\n[INTERRUPTED] Saving model state before exit...")
 
-    # -------------------------------------------------------------------------
-    # 8. Save final model.
-    # -------------------------------------------------------------------------
     final_model_path = log_root / "final_model"
     model.save(str(final_model_path))
     print(f"\nFinal model saved to: {final_model_path}.zip")
