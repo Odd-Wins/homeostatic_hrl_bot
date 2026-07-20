@@ -1,4 +1,4 @@
-"""Unit tests for HomeostaticReward (no Gazebo required, pure math)."""
+"""Unit tests for HomeostaticReward (no Gazebo required)."""
 
 import numpy as np
 
@@ -9,13 +9,12 @@ from homeostatic_bot.homeostatic_reward import (
 
 
 def make_obs(soc: float = 100.0, lidar=(10.0, 10.0, 10.0)) -> np.ndarray:
-    """Build a synthetic 12-D observation. Other fields set to harmless values."""
     obs = np.zeros(12, dtype=np.float32)
-    obs[5] = soc                # SOC — only field the drive uses
-    obs[6] = 100.0              # SOH (irrelevant to reward)
-    obs[7] = lidar[0]           # lidar front
-    obs[8] = lidar[1]           # lidar left
-    obs[9] = lidar[2]           # lidar right
+    obs[5] = soc                
+    obs[6] = 100.0              
+    obs[7] = lidar[0]           
+    obs[8] = lidar[1]           
+    obs[9] = lidar[2]           
     return obs
 
 

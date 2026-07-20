@@ -16,7 +16,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rosgraph_msgs.msg import Clock
+from geometry_msgs.msg import PoseArray
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Float32MultiArray
 
 
 # Type alias: reward_fn(prev_obs, action, next_obs, info) -> float
@@ -24,16 +26,6 @@ RewardFn = Callable[[np.ndarray, np.ndarray, np.ndarray, dict], float]
 
 
 class HomeostaticBotEnv(gym.Env):
-    """TurtleBot3 Waffle in energy_world — 12-D state, 2-D continuous action, 10 Hz.
-
-    Operates in two modes:
-      goal_conditioned=False (default): 12-D Box observation, used by threshold baseline
-        and standalone evaluation. Reward injected via reward_fn.
-      goal_conditioned=True: Dict observation (observation, achieved_goal, desired_goal)
-        compatible with SB3's HerReplayBuffer. Reward computed internally with
-        compute_reward() so HER can recompute on goal relabeling. reward_fn ignored.
-    """
-
     metadata = {"render_modes": []}
 
     # Arena / task geometry
@@ -41,10 +33,6 @@ class HomeostaticBotEnv(gym.Env):
     CHARGER_POS = np.array([4.0, 4.0], dtype=np.float32)
     CHARGER_RADIUS = 0.5
     GOAL_REACHED_RADIUS = 0.3
-    # Option C: when set to a list of (x, y) tuples, reset() picks goals uniformly
-    # from this fixed set instead of random-sampling-with-rejection. None = methodology
-    # default (random sampling). Override per-instance from train_flat.py only.
-    # See Phase4_Implementation_Manual_Supplement2.md § 5.
     GOAL_SET = None
     # Multi-goal: number of delivery goals per episode. When > 1, the env
     # generates a queue of goals and advances to the next on each completion.
@@ -68,8 +56,7 @@ class HomeostaticBotEnv(gym.Env):
     HUANG_ALPHA = 0.05
     HUANG_BETA = 1.2
 
-    # Built-in reward weights (used in goal_conditioned mode for compute_reward()).
-    # These match HomeostaticReward defaults and stay in sync deliberately.
+    # Built-in reward weights 
     SETPOINT = 80.0
     GOAL_BONUS = 10.0
     DEATH_PENALTY = 10.0
@@ -111,10 +98,6 @@ class HomeostaticBotEnv(gym.Env):
         )
 
         if self.goal_conditioned:
-            # Dict obs format expected by SB3 HER:
-            #   observation: the 12-D vector
-            #   achieved_goal: current robot position (x, y)
-            #   desired_goal: target goal position (x, y)
             goal_low = np.array([-5, -5], dtype=np.float32)
             goal_high = np.array([5, 5], dtype=np.float32)
             self.observation_space = spaces.Dict({
@@ -136,6 +119,7 @@ class HomeostaticBotEnv(gym.Env):
             rclpy.init()
         self._node = Node("homeostatic_env")
         self._cmd_pub = self._node.create_publisher(TwistStamped, "/cmd_vel", 10)
+        self._battery_pub = self._node.create_publisher(Float32MultiArray, "/battery_status", 10)
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -145,6 +129,13 @@ class HomeostaticBotEnv(gym.Env):
         self._node.create_subscription(Odometry, "/odom", self._odom_cb, sensor_qos)
         self._node.create_subscription(LaserScan, "/scan", self._scan_cb, sensor_qos)
         self._node.create_subscription(Clock, "/clock", self._clock_cb, sensor_qos)
+        # Ground truth pose from Gazebo (bridged from /world/.../dynamic_pose/info).
+        self._node.create_subscription(
+            PoseArray,
+            "/world/energy_world/dynamic_pose/info",
+            self._ground_truth_cb,
+            sensor_qos,
+        )
 
         self._latest_pose = None
         self._latest_twist = None
@@ -155,6 +146,12 @@ class HomeostaticBotEnv(gym.Env):
         self._executor.add_node(self._node)
         self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._spin_thread.start()
+
+        # Odom offset correction 
+        self._odom_offset_x = 0.0
+        self._odom_offset_y = 0.0
+        self._odom_needs_recapture = False
+        self._latest_pose_raw = None
 
         # Internal state
         self._soc = self.INIT_SOC
@@ -169,10 +166,30 @@ class HomeostaticBotEnv(gym.Env):
         self._rng = np.random.default_rng(seed)
         self._use_sim_time: Optional[bool] = None
 
-    # ----- ROS callbacks -------------------------------------------------------
+    # ----- ROS callbacks -------------------
     def _odom_cb(self, msg: Odometry) -> None:
-        self._latest_pose = msg.pose.pose
+        # Only used for twist (velocity). Position comes from ground truth.
         self._latest_twist = msg.twist.twist
+
+    def _ground_truth_cb(self, msg: PoseArray) -> None:
+        #Extract waffle pose from Gazebo ground truth PoseArray.
+        if len(msg.poses) == 0:
+            return
+        if not hasattr(self, '_waffle_pose_idx'):
+            self._waffle_pose_idx = None
+
+        if self._waffle_pose_idx is not None and self._waffle_pose_idx < len(msg.poses):
+            pose = msg.poses[self._waffle_pose_idx]
+        else:
+            best_idx = 0
+            for i, p in enumerate(msg.poses):
+                if abs(p.position.z - 0.01) < 0.05:
+                    best_idx = i
+                    break
+            self._waffle_pose_idx = best_idx
+            pose = msg.poses[best_idx]
+
+        self._latest_pose = pose
 
     def _scan_cb(self, msg: LaserScan) -> None:
         self._latest_scan = msg
@@ -211,7 +228,15 @@ class HomeostaticBotEnv(gym.Env):
             target_time = self._latest_sim_time + self.CONTROL_PERIOD
             wall_start = time.time()
             while self._latest_sim_time < target_time:
-                if time.time() - wall_start > 5.0:
+                stall_duration = time.time() - wall_start
+                if stall_duration > 10.0:
+                    self._node.get_logger().warn(
+                        "Sim-time stalled >10s — restarting ros_gz_bridge."
+                    )
+                    self._restart_bridge()
+                    time.sleep(1.0)
+                    wall_start = time.time()
+                elif stall_duration > 5.0:
                     self._node.get_logger().warn(
                         "Sim-time not advancing — falling back to sleep."
                     )
@@ -221,7 +246,49 @@ class HomeostaticBotEnv(gym.Env):
         else:
             time.sleep(self.CONTROL_PERIOD)
 
-    # ----- Gazebo teleport ----------------------------------------------------
+    # ----- Bridge watchdog --------------
+    BRIDGE_CONFIG = "/opt/ros/jazzy/share/turtlebot3_gazebo/params/turtlebot3_waffle_bridge.yaml"
+    _bridge_proc: Optional[subprocess.Popen] = None
+
+    def _restart_bridge(self) -> None:
+        #Kill and respawn the ros_gz_bridge parameter_bridge process.
+        # Kill existing bridge if tracked
+        if self._bridge_proc is not None:
+            self._bridge_proc.terminate()
+            try:
+                self._bridge_proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                self._bridge_proc.kill()
+            self._bridge_proc = None
+
+        # kill any orphaned bridge processes
+        subprocess.run(["pkill", "-f", "parameter_bridge"], capture_output=True)
+        time.sleep(0.5)
+
+        # Respawn
+        self._bridge_proc = subprocess.Popen(
+            [
+                "ros2", "run", "ros_gz_bridge", "parameter_bridge",
+                "--ros-args", "-p", f"config_file:={self.BRIDGE_CONFIG}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self._node.get_logger().info(
+            f"Restarted ros_gz_bridge (PID {self._bridge_proc.pid})"
+        )
+
+        # Wait for /clock to resume
+        self._latest_sim_time = None
+        start = time.time()
+        while self._latest_sim_time is None and time.time() - start < 10.0:
+            time.sleep(0.1)
+        if self._latest_sim_time is not None:
+            self._node.get_logger().info("Bridge recovered — /clock publishing again.")
+        else:
+            self._node.get_logger().error("Bridge restart failed — /clock still not publishing.")
+
+    # ----- Gazebo teleport ---------------------
     def _teleport_robot(self, x: float, y: float, yaw: float) -> bool:
         qz = math.sin(yaw / 2.0)
         qw = math.cos(yaw / 2.0)
@@ -239,10 +306,29 @@ class HomeostaticBotEnv(gym.Env):
             "--req", req,
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=2.0, text=True)
+            result = subprocess.run(cmd, capture_output=True, timeout=5.0, text=True)
             return "data: true" in result.stdout
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
+
+    def sync_visual_to_odom(self) -> None:
+        #Teleport the Gazebo model to match corrected odom position.
+        if self._latest_pose is None:
+            return
+        # Save the corrected position before sync
+        saved_x = self._latest_pose.position.x
+        saved_y = self._latest_pose.position.y
+        # Extract yaw from orientation quaternion
+        q = self._latest_pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self._teleport_robot(saved_x, saved_y, yaw)
+        # Wait for DiffDrive to publish new raw odom after teleport
+        time.sleep(0.2)
+        # Set offset so corrected = raw - offset = saved position
+        if self._latest_pose_raw is not None:
+            self._odom_offset_x = self._latest_pose_raw.position.x - saved_x
+            self._odom_offset_y = self._latest_pose_raw.position.y - saved_y
 
     # ----- Gym API -------------------------------------------------------------
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -250,18 +336,13 @@ class HomeostaticBotEnv(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
-        # 1. Stop the robot before teleporting.
+        #Stop the robot before teleporting.
         stop_cmd = TwistStamped()
-        for _ in range(5):
+        for _ in range(2):
             self._cmd_pub.publish(stop_cmd)
-            time.sleep(0.05)
-        time.sleep(0.2)
+            time.sleep(0.02)
+        time.sleep(0.1)
 
-        # 2. Teleport to origin with retry.
-        #    Note: /odom reports integrated odometry, NOT true Gazebo pose. After
-        #    set_pose, /odom may lag or report stale values. We trust the service
-        #    response and do NOT verify via _latest_pose — that caused false-negative
-        #    retry loops in previous versions.
         start_yaw = float(self._rng.uniform(-math.pi, math.pi))
         ok = False
         for attempt in range(3):
@@ -271,15 +352,17 @@ class HomeostaticBotEnv(gym.Env):
             self._node.get_logger().warn(
                 f"Teleport attempt {attempt + 1}/3 failed. Retrying..."
             )
-            time.sleep(0.5)
+            time.sleep(0.2)
         if not ok:
             self._node.get_logger().error(
                 "All teleport attempts failed. Check ROBOT_NAME matches Gazebo model "
                 f"(current: '{self.ROBOT_NAME}'). Run `gz model --list` to verify."
             )
-        time.sleep(0.3)
+        time.sleep(0.15)
 
-        # Goal selection — generate NUM_GOALS delivery targets.
+        # DiffDrive doesn't reset odometry on teleport. Force full stop
+        # and capture offset after odom settles.
+        # Goal selection - generate NUM_GOALS delivery targets.
         self._goal_queue: list[np.ndarray] = []
         for _ in range(self.NUM_GOALS):
             if self.GOAL_SET is not None:
@@ -298,7 +381,7 @@ class HomeostaticBotEnv(gym.Env):
         self._goals_completed = 0
         self._goal = self._goal_queue[0].copy()
 
-        self._soc = self.INIT_SOC
+        self._soc = float(options["initial_soc"]) if options and "initial_soc" in options else self.INIT_SOC
         self._soh = float(options["initial_soh"]) if options and "initial_soh" in options else self.INIT_SOH
         self._charge_cycles = 0
         self._was_charging = False
@@ -307,6 +390,9 @@ class HomeostaticBotEnv(gym.Env):
 
         self._wait_for_sensors()
         self._decide_clock_source()
+
+        # Wait for ground truth pose to update after teleport.
+        time.sleep(0.2)
 
         flat_obs = self._compute_flat_obs()
         self._prev_obs = flat_obs.copy()
@@ -335,7 +421,7 @@ class HomeostaticBotEnv(gym.Env):
         # 2. Sim-time wait
         self._wait_one_period()
 
-        # 3. Battery update — capture prev SOC for drive computation
+        # 3. Battery update - capture prev SOC for drive computation
         prev_soc = self._soc
         self._tick_battery(twist.twist.linear.x, twist.twist.angular.z)
 
@@ -363,13 +449,11 @@ class HomeostaticBotEnv(gym.Env):
         terminated = bool(reached_goal or battery_dead)
         truncated = bool(time_limit and not terminated)
 
-        # Lidar minimum (used both for collision penalty and stored in info for HER)
+        # Lidar minimum 
         lidar_min = float(min(flat_obs[7], flat_obs[8], flat_obs[9]))
 
-        # 5. Reward — different path depending on mode
+        # 5. Reward - different path depending on mode
         if self.goal_conditioned:
-            # Compute the homeostatic reward internally so HER can recompute
-            # consistent rewards on relabeled transitions.
             reward = float(self._compute_full_reward(
                 prev_soc=prev_soc,
                 next_soc=self._soc,
@@ -407,6 +491,11 @@ class HomeostaticBotEnv(gym.Env):
 
         self._prev_obs = flat_obs.copy()
 
+        # Publish battery status for RViz2 display node.
+        batt_msg = Float32MultiArray()
+        batt_msg.data = [float(self._soc), float(self._soh)]
+        self._battery_pub.publish(batt_msg)
+
         if self.goal_conditioned:
             return self._wrap_goal_dict(flat_obs), reward, terminated, truncated, info
         return flat_obs, reward, terminated, truncated, info
@@ -421,7 +510,7 @@ class HomeostaticBotEnv(gym.Env):
         desired_goal: np.ndarray,
         battery_dead: bool,
     ) -> float:
-        """Full homeostatic reward — used internally in goal_conditioned mode."""
+        #Full homeostatic reward - used internally in goal_conditioned mode
         drive_before = abs(prev_soc - self.SETPOINT)
         drive_after = abs(next_soc - self.SETPOINT)
         reward = drive_before - drive_after - self.STEP_COST
@@ -434,14 +523,6 @@ class HomeostaticBotEnv(gym.Env):
         return reward
 
     def compute_reward(self, achieved_goal, desired_goal, info):
-        """Recompute reward for HER-relabeled transitions.
-
-        SB3's HerReplayBuffer calls this with batched arrays and a list of info
-        dicts. For each transition, the non-goal-bonus part of the reward
-        (drive change, step cost, collision, death) is preserved from the
-        original transition (via info["non_goal_reward"]). The goal bonus is
-        recomputed from the relabeled desired_goal.
-        """
         achieved = np.asarray(achieved_goal, dtype=np.float32).reshape(-1, 2)
         desired = np.asarray(desired_goal, dtype=np.float32).reshape(-1, 2)
         distance = np.linalg.norm(achieved - desired, axis=-1)
@@ -514,7 +595,6 @@ class HomeostaticBotEnv(gym.Env):
         )
 
     def _wrap_goal_dict(self, flat_obs: np.ndarray) -> dict:
-        """Convert flat 12-D obs to HER-compatible Dict observation."""
         return {
             "observation": flat_obs,
             "achieved_goal": np.array([flat_obs[0], flat_obs[1]], dtype=np.float32),
@@ -523,7 +603,6 @@ class HomeostaticBotEnv(gym.Env):
 
     @staticmethod
     def _sector_mins(scan: LaserScan) -> tuple[float, float, float]:
-        """Min range per sector: front ±30°, left 30..150°, right -30..-150°."""
         ranges = np.array(scan.ranges, dtype=np.float32)
         ranges[~np.isfinite(ranges)] = scan.range_max
         ranges = np.clip(ranges, scan.range_min, scan.range_max)

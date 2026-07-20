@@ -1,4 +1,4 @@
-"""Fixed-threshold rule-based baseline — Phase 6 ablation floor (no learning)."""
+"""Fixed-threshold rule-based baseline """
 
 from dataclasses import dataclass, field
 from typing import Optional
@@ -21,8 +21,7 @@ _IDX_LIDAR_RIGHT = 9
 
 @dataclass
 class ThresholdPolicy:
-    """If SOC < threshold, drive to charger. Otherwise drive to goal. Reactive obstacle avoidance."""
-
+    #If SOC < threshold, drive to charger. Otherwise drive to goal. Reactive obstacle avoidance.
     # Charging logic
     charge_threshold: float = 30.0       # Below this SOC, divert to charger.
 
@@ -45,7 +44,7 @@ class ThresholdPolicy:
     debug: bool = False
 
     def __call__(self, obs: np.ndarray, goal: np.ndarray) -> np.ndarray:
-        """Compute action from observation. Returns [linear_vel, angular_vel]."""
+        #Compute action from observation. Returns [linear_vel, angular_vel]
 
         # 1. Decide target - charger or goal?
         soc = obs[_IDX_SOC]
@@ -84,7 +83,7 @@ class ThresholdPolicy:
             np.cos(target_heading - yaw),
         )
 
-        # Heading deadband: don't try to correct tiny errors. Prevents oscillation
+        # Heading deadband: Prevents oscillation
         # around the target heading when proportional gain alone would over/undershoot.
         if abs(heading_error) < self.heading_deadband:
             angular = 0.0
@@ -116,11 +115,17 @@ def run_episode(
     run_logger: RunLogger,
     episode_id: str,
     initial_soh: Optional[float] = None,
+    initial_soc: Optional[float] = None,
     verbose: bool = True,
 ) -> dict:
-    """Run one episode with the threshold policy. Logs every step + episode summary."""
+    #Run one episode with the threshold policy. Logs every step + episode summary
 
-    options = {"initial_soh": initial_soh} if initial_soh is not None else None
+    options = {}
+    if initial_soh is not None:
+        options["initial_soh"] = initial_soh
+    if initial_soc is not None:
+        options["initial_soc"] = initial_soc
+    options = options or None
     obs, info = env.reset(options=options)
     goal = info["goal"]
 
@@ -170,89 +175,129 @@ def run_episode(
 
 
 def main():
-    """Run the threshold baseline across all SOH levels — Phase 6 evaluation pattern."""
+    #Run the threshold baseline across all SOH levels — Phase 6 evaluation grid
+
+    # =================================================================
+    # CONFIG
+    # =================================================================
+    SOH_LEVELS = [100.0, 80.0, 60.0, 40.0]
+    SOC_LEVELS = [80.0, 60.0, 40.0]  
+    EPISODES_PER_CONDITION = 50
+    SEEDS = [42,1963, 1949, 456, 789]  
+    NUM_GOALS = 2
+
+    DRAIN_RATE_MOVING = 0.5
+    DRAIN_RATE_IDLE = 0.005
+    CHARGE_RATE = 5.0
+    MAX_EPISODE_STEPS = 1200
 
     print("=" * 70)
-    print("Threshold baseline — Phase 6 evaluation pattern (1 episode per SOH)")
+    print("Threshold baseline - Phase 6 evaluation grid (2-goal, SOC sweep)")
     print("=" * 70)
 
     from homeostatic_bot.homeostatic_reward import HomeostaticReward
 
-    env = HomeostaticBotEnv(reward_fn=HomeostaticReward(), seed=42)
-
-    # -------------------------------------------------------------------
-    # OVERRIDE BATTERY RATES for policy evaluation.
-    # The env's class defaults (5.0/0.01/10.0) are aggressive smoke-test values
-    # that drain the battery in 20 seconds — too fast for any policy to demonstrate
-    # competence. Override with policy-evaluation values that give ~200s mission time.
-    # Same rates will be used for TD3 training.
-    # -------------------------------------------------------------------
-    env.DRAIN_RATE_MOVING = 0.5      # %/s while moving (was 5.0)
-    env.DRAIN_RATE_IDLE = 0.005      # %/s while idle (was 0.01)
-    env.CHARGE_RATE = 2.0            # %/s while charging (was 10.0)
-
     policy = ThresholdPolicy(debug=False)
-
-    run_logger = RunLogger(
-        experiment_name="threshold_baseline",
-        config={
-            "policy": policy,
-            "reward": "HomeostaticReward(default)",
-            "env_seed": 42,
-            "soh_levels": [100.0, 80.0, 60.0, 40.0],
-            "battery_rates": {
-                "drain_moving": env.DRAIN_RATE_MOVING,
-                "drain_idle": env.DRAIN_RATE_IDLE,
-                "charge_rate": env.CHARGE_RATE,
-            },
-        },
-    )
 
     print(f"\nPolicy: charge_threshold={policy.charge_threshold}%, "
           f"linear_vel={policy.linear_vel} m/s, "
           f"angular_gain={policy.angular_gain}, "
           f"heading_deadband={policy.heading_deadband:.2f} rad, "
           f"avoid_threshold={policy.avoid_threshold} m")
-    print(f"Battery: drain_moving={env.DRAIN_RATE_MOVING} %/s, "
-          f"drain_idle={env.DRAIN_RATE_IDLE} %/s, "
-          f"charge_rate={env.CHARGE_RATE} %/s\n")
+    print(f"Battery: drain_moving={DRAIN_RATE_MOVING} %/s, "
+          f"drain_idle={DRAIN_RATE_IDLE} %/s, "
+          f"charge_rate={CHARGE_RATE} %/s")
+    print(f"Goals per episode: {NUM_GOALS}")
+    print(f"SOH levels: {SOH_LEVELS}")
+    print(f"SOC levels: {SOC_LEVELS}")
+    print(f"Episodes per condition per seed: {EPISODES_PER_CONDITION}")
+    print(f"Seeds: {SEEDS}")
+    print(f"Total episodes: {len(SOH_LEVELS) * len(SOC_LEVELS) * EPISODES_PER_CONDITION * len(SEEDS)}\n")
 
-    results = {}
-    for soh in [100.0, 80.0, 60.0, 40.0]:
-        episode_id = f"soh{int(soh)}_ep0"
-        print(f"--- SOH = {soh}% ---")
-        result = run_episode(
-            env=env,
-            policy=policy,
-            run_logger=run_logger,
-            episode_id=episode_id,
-            initial_soh=soh,
-            verbose=True,
-        )
-        results[soh] = result
-        print(
-            f"  → outcome: {result['outcome']}, "
-            f"steps: {result['steps']}, "
-            f"final SOC: {result['final_soc']:.1f}%, "
-            f"reward: {result['total_reward']:+.1f}, "
-            f"charging visits: {result['charging_visits']}\n"
+    all_results: dict[tuple, list[dict]] = {}
+    for soc in SOC_LEVELS:
+        for soh in SOH_LEVELS:
+            all_results[(soc, soh)] = []
+
+    for seed in SEEDS:
+        print(f"\n{'='*40} Seed {seed} {'='*40}")
+
+        env = HomeostaticBotEnv(reward_fn=HomeostaticReward(), seed=seed)
+        env.DRAIN_RATE_MOVING = DRAIN_RATE_MOVING
+        env.DRAIN_RATE_IDLE = DRAIN_RATE_IDLE
+        env.CHARGE_RATE = CHARGE_RATE
+        env.NUM_GOALS = NUM_GOALS
+        env.MAX_EPISODE_STEPS = MAX_EPISODE_STEPS
+
+        run_logger = RunLogger(
+            experiment_name="threshold_baseline_2goal",
+            config={
+                "policy": "ThresholdPolicy(charge_threshold=30%)",
+                "reward": "HomeostaticReward(default)",
+                "env_seed": seed,
+                "num_goals": NUM_GOALS,
+                "soh_levels": SOH_LEVELS,
+                "soc_levels": SOC_LEVELS,
+                "episodes_per_condition": EPISODES_PER_CONDITION,
+                "battery_rates": {
+                    "drain_moving": DRAIN_RATE_MOVING,
+                    "drain_idle": DRAIN_RATE_IDLE,
+                    "charge_rate": CHARGE_RATE,
+                },
+            },
         )
 
+        for soc in SOC_LEVELS:
+            for soh in SOH_LEVELS:
+                print(f"\n--- SOC = {soc}%, SOH = {soh}%, Seed = {seed} ---")
+                for ep in range(EPISODES_PER_CONDITION):
+                    episode_id = f"seed{seed}_soc{int(soc)}_soh{int(soh)}_ep{ep}"
+                    result = run_episode(
+                        env=env,
+                        policy=policy,
+                        run_logger=run_logger,
+                        episode_id=episode_id,
+                        initial_soh=soh,
+                        initial_soc=soc,
+                        verbose=(ep < 2),
+                    )
+                    all_results[(soc, soh)].append(result)
+
+                    if ep < 2 or (ep + 1) % 10 == 0:
+                        print(
+                            f"  ep {ep}: {result['outcome']:<14} "
+                            f"steps={result['steps']:>5}  "
+                            f"SOC={result['final_soc']:>5.1f}%  "
+                            f"reward={result['total_reward']:>+8.1f}  "
+                            f"charges={result['charging_visits']}"
+                        )
+
+        run_logger.close()
+        env.close()
+
+    # Summary table
+    print("\n" + "=" * 70)
+    print("Summary (aggregated across all seeds)")
     print("=" * 70)
-    print("Summary")
-    print("=" * 70)
-    print(f"{'SOH':>5}  {'Outcome':<14}  {'Steps':>6}  {'FinalSOC':>9}  "
-          f"{'Reward':>8}  {'Visits':>6}")
-    for soh, r in results.items():
-        print(
-            f"{soh:>4}%  {r['outcome']:<14}  {r['steps']:>6}  "
-            f"{r['final_soc']:>8.1f}%  {r['total_reward']:>+8.1f}  "
-            f"{r['charging_visits']:>6}"
-        )
+    print(f"{'SOC':>5}  {'SOH':>5}  {'N':>4}  {'Success%':>8}  {'MeanSteps':>10}  "
+          f"{'MeanSOC':>8}  {'MeanReward':>11}  {'MeanCharges':>12}")
+    for soc in SOC_LEVELS:
+        for soh in SOH_LEVELS:
+            rs = all_results[(soc, soh)]
+            n = len(rs)
+            if n == 0:
+                continue
+            successes = sum(1 for r in rs if r['outcome'] == 'reached_goal')
+            mean_steps = sum(r['steps'] for r in rs) / n
+            mean_soc = sum(r['final_soc'] for r in rs) / n
+            mean_reward = sum(r['total_reward'] for r in rs) / n
+            mean_charges = sum(r['charging_visits'] for r in rs) / n
+            print(
+                f"{soc:>4}%  {soh:>4}%  {n:>4}  {successes/n*100:>7.1f}%  {mean_steps:>10.1f}  "
+                f"{mean_soc:>7.1f}%  {mean_reward:>+11.1f}  {mean_charges:>12.1f}"
+            )
 
-    run_logger.close()
-    env.close()
-    print("\n✓ Threshold baseline complete.")
+    print("\n✓ Threshold baseline (2-goal) complete.")
 
 
 if __name__ == "__main__":

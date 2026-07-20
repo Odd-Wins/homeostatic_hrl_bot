@@ -1,4 +1,4 @@
-"""End-to-end smoke test for HomeostaticBotEnv (requires Gazebo running)."""
+"""End-to-end smoke test for HomeostaticBotEnv ( Gazebo must be running)."""
 
 import numpy as np
 

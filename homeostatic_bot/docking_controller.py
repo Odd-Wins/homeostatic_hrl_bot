@@ -1,4 +1,4 @@
-"""Docking controller — AprilTag visual servoing to charging station, publishes /charging/detected."""
+"""Docking controller - AprilTag visual servoing to charging station, publishes /charging/detected."""
 
 import rclpy
 from rclpy.node import Node
@@ -10,7 +10,7 @@ from tf2_ros import LookupException, ConnectivityException, ExtrapolationExcepti
 
 
 class DockingController(Node):
-    """Drives the robot toward an AprilTag using TF2 transforms; runs at 10 Hz."""
+    #Drives the robot toward an AprilTag using TF2 transforms; runs at 10 Hz.
 
     def __init__(self):
         super().__init__('docking_controller')
@@ -52,7 +52,7 @@ class DockingController(Node):
         self.get_logger().info(f'Will stop at: {self.docking_distance}m from tag')
 
     def control_loop(self):
-        """Main control loop - runs at 10 Hz"""
+        #Main control loop - runs at 10 Hz
         twist = TwistStamped()
         twist.header.stamp = self.get_clock().now().to_msg()
         twist.header.frame_id = 'base_link'
@@ -115,17 +115,12 @@ class DockingController(Node):
         except (LookupException, ConnectivityException, ExtrapolationException):
             # Can't see the tag
             if self.is_docked:
-                # Was docked, might have lost sight briefly - keep charging
                 charging_msg.data = True
             elif hasattr(self, '_tag_seen') and self._tag_seen:
-                # Tag was visible recently but TF went briefly stale
-                # Keep last command to avoid stuttering
                 charging_msg.data = False
                 self.charging_pub.publish(charging_msg)
                 return
             else:
-                # Not docked and can't see tag - DON'T publish cmd_vel
-                # so teleop/RL agent can control the robot freely
                 charging_msg.data = False
                 self.get_logger().info('Tag not visible...', throttle_duration_sec=2.0)
                 self.charging_pub.publish(charging_msg)

@@ -7,15 +7,12 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # Package directories
     pkg_homeostatic = get_package_share_directory('homeostatic_bot')
     pkg_turtlebot3_gazebo = get_package_share_directory('turtlebot3_gazebo')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
     
-    # Path to your custom world
     world_file = os.path.join(pkg_homeostatic, 'worlds', 'energy_world.sdf')
     
-    # Set Gazebo resource path (include BOTH TurtleBot3 AND your models)
     gz_resource_path = SetEnvironmentVariable(
         name='GZ_SIM_RESOURCE_PATH',
         value=os.path.join(pkg_homeostatic, 'models') + ':' +
@@ -28,14 +25,14 @@ def generate_launch_description():
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
         ),
         launch_arguments={
-            'gz_args': f'-r -v2 -s {world_file}',
+            'gz_args': f'-r -v2 {world_file}',  # GUI mode for demo
             'on_exit_shutdown': 'true'
         }.items()
     )
     
     # Spawn TurtleBot3 (DELAYED to let Gazebo start)
     spawn_robot = TimerAction(
-        period=5.0,  # Wait 5 seconds for Gazebo to be ready
+        period=5.0,  
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -57,7 +54,7 @@ def generate_launch_description():
         launch_arguments={'use_sim_time': 'true'}.items()
     )
     
-    # Camera bridges disabled — Sensors plugin (ogre2) is off for headless training.
+    # Camera bridges disabled — Sensors plugin (ogre2) off for headless training.
     # Re-enable for AprilTag / visual servoing deployment:
     # image_bridge = Node(
     #     package='ros_gz_image',
@@ -76,9 +73,22 @@ def generate_launch_description():
     #     parameters=[{'use_sim_time': True}],
     # )
 
+    # Bridge ground-truth pose from Gazebo for accurate position after teleport.
+    # DiffDrive's /odom accumulates drift on set_pose - provides true position.
+    ground_truth_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/world/energy_world/dynamic_pose/info@geometry_msgs/msg/PoseArray[gz.msgs.Pose_V',
+        ],
+        output='screen',
+        parameters=[{'use_sim_time': True}],
+    )
+
     return LaunchDescription([
         gz_resource_path,
         gazebo,
         spawn_robot,
         robot_state_publisher,
+        ground_truth_bridge,
     ])

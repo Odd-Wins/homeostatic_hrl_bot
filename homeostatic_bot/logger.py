@@ -11,12 +11,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-# Default log root — lives outside the repo so logs aren't tracked in git.
+# Default log root 
 DEFAULT_LOG_ROOT = Path.home() / "thesis_logs"
 
-
-# Per-step columns logged for every episode. Order is fixed so CSVs across runs
-# are comparable. Add new columns by appending to this list — never reorder.
 STEP_COLUMNS = [
     # Timing
     "step",
@@ -37,14 +34,14 @@ STEP_COLUMNS = [
     # Distances (from observation)
     "dist_to_goal_obs",     # from obs vector
     "dist_to_charger_obs",
-    # Action commanded this step
+    # Action commanded 
     "action_lin",
     "action_ang",
     # Reward and termination
     "reward",
     "terminated",
     "truncated",
-    # From info dict (sometimes more accurate than obs)
+    # From info dict 
     "soc_info",
     "soh_info",
     "dist_to_goal_info",
@@ -56,8 +53,6 @@ STEP_COLUMNS = [
     "is_charging",          # within charger radius this step
 ]
 
-
-# Episode-summary columns — one row per episode.
 EPISODE_COLUMNS = [
     "episode_id",
     "start_time",
@@ -77,21 +72,7 @@ EPISODE_COLUMNS = [
 
 
 class RunLogger:
-    """Manages a single 'run' (one invocation of an experiment script).
-
-    Creates a timestamped directory under <log_root>/<experiment_name>/<timestamp>/
-    and writes per-step CSVs, an episode summary CSV, and a metadata JSON.
-
-    Usage pattern:
-        logger = RunLogger("threshold_baseline", config={"charge_threshold": 30.0})
-        for episode in episodes:
-            ep_logger = logger.start_episode(episode_id="soh100_ep0", initial_soh=100.0,
-                                              goal=(1.2, -0.5))
-            for step in steps:
-                ep_logger.log_step(obs, action, reward, terminated, truncated, info)
-            ep_logger.finish(outcome="reached_goal")
-        logger.close()
-    """
+    #Manages a single 'run' (one invocation of an experiment script).
 
     def __init__(
         self,
@@ -114,7 +95,6 @@ class RunLogger:
         print(f"[RunLogger] Logging to: {self.run_dir}")
 
     def _write_metadata(self, config: dict) -> None:
-        # Try to capture git commit so we know exactly which code produced this log.
         git_commit = "unknown"
         try:
             result = subprocess.run(
@@ -159,7 +139,7 @@ class RunLogger:
         initial_soh: float,
         goal: tuple,
     ) -> "EpisodeLogger":
-        """Begin a new episode. Returns an EpisodeLogger for per-step writes."""
+        #Begin a new episode. Returns an EpisodeLogger for per-step writes
         if self._current_episode is not None and not self._current_episode._finished:
             self._current_episode.finish(outcome="abandoned")
         self._current_episode = EpisodeLogger(
@@ -194,7 +174,7 @@ class RunLogger:
 
 
 class EpisodeLogger:
-    """Per-step CSV writer for one episode. Returned by RunLogger.start_episode()."""
+    #Per-step CSV writer for one episode. Returned by RunLogger.start_episode()
 
     def __init__(self, run_dir: Path, episode_id: str, initial_soh: float, goal: tuple):
         self.run_dir = run_dir
@@ -233,7 +213,7 @@ class EpisodeLogger:
         info: dict,
         charger_radius: float = 0.5,
     ) -> None:
-        """Write one row to the per-step CSV. Flushed immediately for crash safety."""
+        #Write one row to the per-step CSV. Flushed immediately for crash safety
         if self._finished:
             raise RuntimeError(f"log_step called on finished episode {self.episode_id}")
 
@@ -289,7 +269,7 @@ class EpisodeLogger:
         self._file.flush()
 
     def finish(self, outcome: str) -> dict:
-        """Close the per-step CSV and return the episode summary dict."""
+        #Close the per-step CSV and return the episode summary dict
         if self._finished:
             return {}
         self._finished = True

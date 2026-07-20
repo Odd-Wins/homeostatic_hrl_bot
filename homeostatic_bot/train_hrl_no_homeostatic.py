@@ -1,4 +1,4 @@
-"""DQN training script for the hierarchical homeostatic RL agent"""
+"""Ablation: HRL DQN training WITHOUT homeostatic drive-reduction reward."""
 
 import signal
 from datetime import datetime
@@ -10,42 +10,44 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 
 from homeostatic_bot.env_wrapper import HomeostaticBotEnv
-from homeostatic_bot.homeostatic_reward import HomeostaticReward
+from homeostatic_bot.hrl_no_homeostatic_reward import NoHomeostaticReward
 from homeostatic_bot.hrl_meta_env import HRLMetaEnv
 
 
 # =============================================================================
-# CONFIG
+# CONFIG - Stage 1 (goal-reaching, SOH=100%)
+# Change to Stage 2 after Stage 1 completes.
 # =============================================================================
 
-TOTAL_TIMESTEPS = 20_000       # meta-steps
+TOTAL_TIMESTEPS = 20_000
 CHECKPOINT_FREQ = 1_000
 SEED = 42
 
-RESUME_FROM = str(Path.home() / "thesis_logs" / "hrl_dqn" / "2026-06-05_22-25-24" / "checkpoints" / "hrl_dqn_2000_steps.zip")
+RESUME_FROM = str(Path.home() / "thesis_logs" / "hrl_dqn_no_homeostatic" / "2026-06-18_19-55-22" / "final_model.zip")
 
 # Battery rates 
 DRAIN_RATE_MOVING = 0.5
 DRAIN_RATE_IDLE = 0.005
 CHARGE_RATE = 5.0
 
-# Stage 1: SOH=100% only (goal-reaching). Set to list for Stage 2.
+# Stage 2: SOH randomized across levels
 SOH_LEVELS = [100.0, 80.0, 60.0, 40.0]
-
-# Option parameters
-MAX_OPTION_STEPS = 300         # ~30s of sim-time per option max
-CHARGER_SOC_TARGET = 80.0     # GOTO_CHARGER terminates when SOC >= setpoint
-SOC_RANGE = (40.0, 100.0)      # Stage 2: randomize initial SOC.
-
+# Stage 2: SOC randomized
+SOC_RANGE = (40.0, 100.0)
+# Stage 2: longer episodes
 MAX_EPISODE_STEPS = 1200
 
-# DQN hyperparameters - small network for 2-action discrete problem.
+# Option parameters - identical to main training
+MAX_OPTION_STEPS = 300
+CHARGER_SOC_TARGET = 80.0
+
+# DQN hyperparameters - identical to main training
 LEARNING_RATE = 1e-3
 BUFFER_SIZE = 50_000
 BATCH_SIZE = 64
-GAMMA = 0.99                  # Required for homeostatic stability (Keramati & Gutkin 2014, Eq. 5)
-EXPLORATION_FRACTION = 0.3     # more exploration since agent must discover charging benefit at low SOH
-EXPLORATION_FINAL_EPS = 0.10   # higher than default - 2 actions need more final exploration
+GAMMA = 0.99
+EXPLORATION_FRACTION = 0.3
+EXPLORATION_FINAL_EPS = 0.10
 LEARNING_STARTS = 500
 TARGET_UPDATE_INTERVAL = 100
 NET_ARCH = [64, 64]
@@ -53,7 +55,7 @@ NET_ARCH = [64, 64]
 
 def main():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_root = Path.home() / "thesis_logs" / "hrl_dqn" / timestamp
+    log_root = Path.home() / "thesis_logs" / "hrl_dqn_no_homeostatic" / timestamp
     log_root.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = log_root / "checkpoints"
     checkpoint_dir.mkdir(exist_ok=True)
@@ -61,25 +63,24 @@ def main():
 
     rng = np.random.default_rng(SEED)
 
-    # Base env in flat mode with homeostatic reward.
+    # Base env with NO HOMEOSTATIC reward.
     base_env = HomeostaticBotEnv(
-        reward_fn=HomeostaticReward(),
+        reward_fn=NoHomeostaticReward(),
         seed=SEED,
         goal_conditioned=False,
     )
     base_env.DRAIN_RATE_MOVING = DRAIN_RATE_MOVING
     base_env.DRAIN_RATE_IDLE = DRAIN_RATE_IDLE
     base_env.CHARGE_RATE = CHARGE_RATE
-    base_env.NUM_GOALS = 2  # multi-goal: 2 deliveries per episode
+    base_env.NUM_GOALS = 2
     base_env.MAX_EPISODE_STEPS = MAX_EPISODE_STEPS
 
-    # Wrap in options-framework meta-env with SOH randomization.
     meta_env = HRLMetaEnv(
         base_env=base_env,
         max_option_steps=MAX_OPTION_STEPS,
         charger_soc_target=CHARGER_SOC_TARGET,
         soh_levels=SOH_LEVELS,
-        soh_rng=rng,
+        soh_rng=rng if SOH_LEVELS else None,
         soc_range=SOC_RANGE,
     )
     meta_env = Monitor(meta_env, filename=str(log_root / "monitor"))
@@ -121,10 +122,11 @@ def main():
         resume_msg = "Training from scratch"
 
     print(f"\n{'=' * 70}")
-    print(f"HRL DQN Training — Hierarchical Homeostatic Agent (Phase 5)")
+    print(f"ABLATION: HRL DQN — NO Homeostatic Drive-Reduction")
     print(f"{'=' * 70}")
     print(f"Log dir:           {log_root}")
     print(f"{resume_msg}")
+    print(f"Reward:            NoHomeostaticReward (goal_bonus + step_cost only)")
     print(f"Total meta-steps:  {TOTAL_TIMESTEPS:,}")
     print(f"Checkpoints:       every {CHECKPOINT_FREQ:,} meta-steps")
     print(f"Seed:              {SEED}")
@@ -143,14 +145,13 @@ def main():
     checkpoint_cb = CheckpointCallback(
         save_freq=CHECKPOINT_FREQ,
         save_path=str(checkpoint_dir),
-        name_prefix="hrl_dqn",
+        name_prefix="hrl_no_homeo",
         save_replay_buffer=False,
         save_vecnormalize=False,
     )
 
     def _sigterm_handler(signum, frame):
         raise KeyboardInterrupt
-
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     try:
@@ -170,7 +171,7 @@ def main():
     print(f"TensorBoard logs:     {tb_dir}")
 
     meta_env.close()
-    print("\n✓ HRL training complete.")
+    print("\n✓ Ablation training complete.")
 
 
 if __name__ == "__main__":

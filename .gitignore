@@ -21,3 +21,13 @@ Thumbs.db
 
 # Byte-compiled files
 *.py[cod]
+
+# Training data / logs
+thesis_logs/
+thesis_documentation/
+
+# Stable-Baselines3 model files
+*.zip
+
+# TensorBoard
+tensorboard/

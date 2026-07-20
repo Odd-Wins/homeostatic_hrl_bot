@@ -1,4 +1,4 @@
-"""Battery node — tracks SOC and SOH with Huang et al. (2022) capacity fade + 1/SOH power fade."""
+"""Battery node - tracks SOC and SOH capacity fade + 1/SOH power fade)."""
 
 import rclpy
 from rclpy.node import Node
@@ -7,12 +7,12 @@ from geometry_msgs.msg import TwistStamped
 
 
 class BatteryNode(Node):
-    """Publishes /battery/soc and /battery/soh at 10 Hz; consumes /cmd_vel and /charging/detected."""
+    # Publishes /battery/soc and /battery/soh
 
     def __init__(self):
         super().__init__('battery_node')
 
-        # Declare configurable parameters
+        # Configurable parameters
         self.declare_parameter('drain_rate_moving', 0.5)    # % per sec
         self.declare_parameter('drain_rate_idle', 0.05)     # % per sec
         self.declare_parameter('charge_rate', 2.0)          # % per sec
@@ -29,12 +29,12 @@ class BatteryNode(Node):
         self.cycle_threshold = self.get_parameter('cycle_threshold').value
 
         # Battery state
-        self.soc = 100.0          # State of Charge
-        self.soh = 100.0          # State of Health
+        self.soc = 100.0         
+        self.soh = 100.0          
         self.charge_cycles = 0    # no. of completed charge cycles
 
         # Cycle tracking
-        self.was_below_threshold = False  # Track if we dipped below threshold
+        self.was_below_threshold = False  # Track if dipped below threshold
 
         # State tracking
         self.is_moving = False
@@ -67,22 +67,22 @@ class BatteryNode(Node):
         self.get_logger().info(f'Cycle threshold: {self.cycle_threshold}%')
 
     def cmd_vel_callback(self, msg):
-        """Check if robot is moving based on velocity commands."""
+        # Check if robot is moving based on velocity commands
         linear = abs(msg.twist.linear.x) + abs(msg.twist.linear.y)
         angular = abs(msg.twist.angular.z)
         self.is_moving = (linear > 0.01) or (angular > 0.01)
 
     def charging_callback(self, msg):
-        """Update charging state from docking controller."""
+        # Update charging state from docking controller
         self.is_charging = msg.data
 
     def update_soh(self):
-        """Apply Huang et al. degradation model: SOH(n) = 1 - alpha * n^beta"""
+        # Huang et al. degradation model
         degradation = self.alpha * (self.charge_cycles ** self.beta)
         self.soh = max(0.0, (1.0 - degradation) * 100.0)  # converts to percentage
 
     def update_battery(self):
-        """Update battery state every 0.1 seconds."""
+        # Update battery state every 0.1 seconds
         dt = 0.1  # Time step per seconds
 
         # Power fade multiplier - degraded battery  drains faster
@@ -140,7 +140,7 @@ class BatteryNode(Node):
                     f'Cycles: {self.charge_cycles} | DrainMult: {soh_factor:.2f}x | {status}'
                 )
 
-        # law battery warning
+        # low battery warning
         if self.soc <= 20.0 and self.soc > 0:
             self.get_logger().warn(f'LOW BATTERY: {self.soc:.1f}%')
         elif self.soc <= 0:

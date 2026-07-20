@@ -28,6 +28,13 @@ setup(
              'models/apriltag_0/model.sdf']),
         (os.path.join('share', package_name, 'models', 'apriltag_0', 'materials', 'textures'),
             ['models/apriltag_0/materials/textures/tag36_11_00000.png']),
+        # Demo label models
+        *[(os.path.join('share', package_name, 'models', label),
+            [f'models/{label}/model.config', f'models/{label}/model.sdf'])
+          for label in ['charger_label', 'goal_label', 'obstacle_a_label', 'obstacle_b_label', 'obstacle_c_label', 'spawn_label']],
+        *[(os.path.join('share', package_name, 'models', label, 'materials', 'textures'),
+            [f'models/{label}/materials/textures/{label}.png'])
+          for label in ['charger_label', 'goal_label', 'obstacle_a_label', 'obstacle_b_label', 'obstacle_c_label', 'spawn_label']],
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -47,6 +54,12 @@ setup(
             'train_flat = homeostatic_bot.train_flat:main',
             'train_hrl = homeostatic_bot.train_hrl:main',
             'eval_hrl = homeostatic_bot.eval_hrl:main',
+            'eval_hrl_no_homeostatic = homeostatic_bot.eval_hrl_no_homeostatic:main',
+            'battery_display = homeostatic_bot.battery_display:main',
+            'demo_hrl = homeostatic_bot.demo_hrl:main',
+            'demo_gui = homeostatic_bot.demo_gui:main',
+            'train_hrl_no_homeostatic = homeostatic_bot.train_hrl_no_homeostatic:main',
+            'verify_odom = homeostatic_bot.verify_odom:main',
         ],
     },
 )

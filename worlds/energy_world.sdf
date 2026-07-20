@@ -163,6 +163,29 @@
       </link>
     </model>
     
+    <!-- Charging radius indicator (0.5m radius circle around charger at 4,4) -->
+    <model name="charger_radius_ring">
+      <static>true</static>
+      <pose>4 4 0.005 0 0 0</pose>
+      <link name="link">
+        <visual name="outer">
+          <geometry><cylinder><radius>0.52</radius><length>0.005</length></cylinder></geometry>
+          <material>
+            <ambient>0.0 1.0 0.0 0.6</ambient>
+            <diffuse>0.0 1.0 0.0 0.6</diffuse>
+          </material>
+        </visual>
+        <visual name="inner">
+          <pose>0 0 0.001 0 0 0</pose>
+          <geometry><cylinder><radius>0.47</radius><length>0.006</length></cylinder></geometry>
+          <material>
+            <ambient>0.9 0.9 0.9 1</ambient>
+            <diffuse>0.9 0.9 0.9 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
     <!-- AprilTag (mounted vertically, facing into arena) -->
     <include>
       <uri>model://apriltag_0</uri>
@@ -223,5 +246,33 @@
       </link>
     </model>
     
+    <!-- ============== DEMO LABELS (visual only, no collision) ============== -->
+
+    <include>
+      <uri>model://charger_label</uri>
+      <name>charger_sign</name>
+      <pose>4 4 2.0 0 0 0</pose>
+    </include>
+
+    <!-- Spawn label removed — clutters view near obstacle_a -->
+
+    <include>
+      <uri>model://obstacle_a_label</uri>
+      <name>obstacle_a_sign</name>
+      <pose>0 2 1.5 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://obstacle_b_label</uri>
+      <name>obstacle_b_sign</name>
+      <pose>-2 -1 1.5 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://obstacle_c_label</uri>
+      <name>obstacle_c_sign</name>
+      <pose>2 -2 1.5 0 0 0</pose>
+    </include>
+
   </world>
 </sdf>

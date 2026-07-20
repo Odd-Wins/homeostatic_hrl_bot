@@ -1,13 +1,4 @@
-"""Options-framework meta-environment for hierarchical homeostatic RL.
-
-Wraps HomeostaticBotEnv. Each step() executes a complete option (GOTO_GOAL
-or GOTO_CHARGER) using NavigationController, accumulating homeostatic reward
-over the option's duration. The high-level DQN learns *when* to charge based
-on the accumulated drive-reduction signal.
-
-Architecture follows Sutton, Precup & Singh (1999) Options framework, adapted
-for energy-aware HRL per Ramezani & Atashgah (2024).
-"""
+"""Options-framework meta-environment for hierarchical homeostatic RL."""
 
 from typing import Any, Callable, Optional
 
@@ -25,11 +16,6 @@ StepCallback = Callable[[np.ndarray, np.ndarray, float, bool, bool, dict, int], 
 
 
 class HRLMetaEnv(gym.Env):
-    """Meta-environment where each step() runs a complete navigation option.
-
-    Action space: Discrete(2) — 0=GOTO_GOAL, 1=GOTO_CHARGER
-    Observation space: Box(12-D) — same as HomeostaticBotEnv flat mode
-    """
 
     metadata = {"render_modes": []}
 
@@ -46,6 +32,7 @@ class HRLMetaEnv(gym.Env):
         step_callback: Optional[StepCallback] = None,
         soh_levels: Optional[list[float]] = None,
         soh_rng: Optional[np.random.Generator] = None,
+        soc_range: Optional[tuple[float, float]] = None,
     ):
         super().__init__()
         self._base_env = base_env
@@ -54,6 +41,7 @@ class HRLMetaEnv(gym.Env):
         self._step_callback = step_callback
         self._soh_levels = soh_levels
         self._soh_rng = soh_rng or np.random.default_rng()
+        self._soc_range = soc_range  # (min, max) or None for default 100%
 
         # Two controllers with different stop radii.
         self._goal_controller = NavigationController(stop_radius=goal_stop_radius)
@@ -72,13 +60,18 @@ class HRLMetaEnv(gym.Env):
             soh = float(self._soh_rng.choice(self._soh_levels))
             options = options or {}
             options["initial_soh"] = soh
+        # Randomize initial SOC per episode if soc_range is configured.
+        if self._soc_range is not None:
+            soc = float(self._soh_rng.uniform(self._soc_range[0], self._soc_range[1]))
+            options = options or {}
+            options["initial_soc"] = soc
         obs, info = self._base_env.reset(seed=seed, options=options)
         self._goal = info["goal"].copy()
         self._latest_obs = obs.copy()
         return obs, info
 
     def _is_charged_at_charger(self, obs) -> bool:
-        """Check if robot is already at charger with SOC at target (action masking)."""
+        # Action MAsking - Check if robot is already at charger with SOC at target 
         if self._latest_obs is None:
             return False
         pos = np.array([obs[0], obs[1]], dtype=np.float32)
@@ -89,13 +82,13 @@ class HRLMetaEnv(gym.Env):
     def step(self, action: int):
         # Action masking: if already at charger with SOC at target,
         # force GOTO_GOAL. This implements the Options framework initiation
-        # set — GOTO_CHARGER is not available when already fully charged
-        # at the charging station. You can't "go to" where you already are.
+        # set - GOTO_CHARGER is not available when already fully charged
+        # at the charging station.
         if action == self.GOTO_CHARGER and self._is_charged_at_charger(self._latest_obs):
             action = self.GOTO_GOAL
 
         if action == self.GOTO_GOAL:
-            target = self._base_env._goal.copy()  # read current goal (may change mid-episode in multi-goal)
+            target = self._base_env._goal.copy()  # read current goal 
             controller = self._goal_controller
         else:
             target = self._base_env.CHARGER_POS
@@ -121,8 +114,7 @@ class HRLMetaEnv(gym.Env):
             if terminated or truncated:
                 break
             if action == self.GOTO_GOAL and info.get("reached_current_goal", False):
-                # Current delivery reached — option ends. The base env has
-                # already advanced to the next goal in the queue.
+                # Current delivery reached - option ends
                 self._goal = self._base_env._goal.copy()
                 break
             if action == self.GOTO_CHARGER:

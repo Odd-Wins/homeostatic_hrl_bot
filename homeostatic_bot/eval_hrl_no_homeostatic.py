@@ -1,8 +1,7 @@
-"""Evaluation script for the trained HRL agent across SOH degradation levels.
+"""Evaluation script for the ablation HRL agent (no homeostatic reward).
 
-Loads the trained DQN model and runs it on the HRLMetaEnv, logging every base-env
-step via the step_callback mechanism. Mirrors the threshold_baseline.py evaluation
-pattern for Phase 6 comparison.
+Identical to eval_hrl.py but loads the ablation model trained with
+NoHomeostaticReward.
 """
 
 from dataclasses import dataclass, field
@@ -14,7 +13,7 @@ import numpy as np
 from stable_baselines3 import DQN
 
 from homeostatic_bot.env_wrapper import HomeostaticBotEnv
-from homeostatic_bot.homeostatic_reward import HomeostaticReward
+from homeostatic_bot.hrl_no_homeostatic_reward import NoHomeostaticReward
 from homeostatic_bot.hrl_meta_env import HRLMetaEnv
 from homeostatic_bot.logger import RunLogger
 
@@ -24,15 +23,15 @@ from homeostatic_bot.logger import RunLogger
 # =============================================================================
 
 MODEL_PATH = str(
-    Path.home() / "thesis_logs" / "hrl_dqn" / "2026-06-06_11-15-39" / "final_model.zip"
+    Path.home() / "thesis_logs" / "hrl_dqn_no_homeostatic" / "2026-06-20_21-46-03" / "final_model.zip"
 )
 SEED = 42
 SOH_LEVELS = [100.0, 80.0, 60.0, 40.0]
-SOC_LEVELS = [80.0, 60.0, 40.0]  # SOC=100% already completed in prior run
+SOC_LEVELS = [100.0, 80.0, 60.0, 40.0]
 EPISODES_PER_CONDITION = 50
-SEEDS = [789]  # seeds 42, 1963, 1949, 456 completed. Last seed.
+SEEDS = [42, 1963, 1949, 456, 789]
 
-# Battery rates — same as training and threshold baseline.
+# Battery rates — same as training and other evals.
 DRAIN_RATE_MOVING = 0.5
 DRAIN_RATE_IDLE = 0.005
 CHARGE_RATE = 5.0
@@ -53,7 +52,6 @@ def run_episode(
     initial_soc: Optional[float] = None,
     verbose: bool = True,
 ) -> dict:
-    #Run one episode with the trained HRL agent. Logs every base-env step
 
     options = {}
     if initial_soh is not None:
@@ -136,7 +134,7 @@ def run_episode(
 
     if verbose:
         print(f"\n  Option decisions:")
-        for entry in option_log[:20]:  # show first 20
+        for entry in option_log[:20]:
             print(
                 f"    [{entry['meta_step']:3d}] {entry['action']:<14} "
                 f"steps={entry['option_steps']:3d}  "
@@ -151,10 +149,10 @@ def run_episode(
 
 def main():
     print("=" * 70)
-    print("HRL DQN Evaluation — Phase 6 degradation grid")
+    print("ABLATION Eval — HRL DQN (No Homeostatic Reward)")
     print("=" * 70)
 
-    # Load trained model.
+    # Load trained ablation model.
     print(f"\nLoading model from: {MODEL_PATH}")
     model = DQN.load(MODEL_PATH)
     print(f"Model loaded successfully.")
@@ -180,7 +178,7 @@ def main():
         print(f"\n{'='*40} Seed {seed} {'='*40}")
 
         base_env = HomeostaticBotEnv(
-            reward_fn=HomeostaticReward(),
+            reward_fn=NoHomeostaticReward(),
             seed=seed,
             goal_conditioned=False,
         )
@@ -197,11 +195,11 @@ def main():
         )
 
         run_logger = RunLogger(
-            experiment_name="hrl_dqn_eval",
+            experiment_name="hrl_dqn_no_homeostatic_eval",
             config={
                 "model_path": MODEL_PATH,
-                "algorithm": "DQN (Options framework HRL)",
-                "reward": "HomeostaticReward(default)",
+                "algorithm": "DQN (Options framework HRL — NO homeostatic reward)",
+                "reward": "NoHomeostaticReward (sparse only)",
                 "env_seed": seed,
                 "num_goals": 2,
                 "soh_levels": SOH_LEVELS,
@@ -271,7 +269,7 @@ def main():
                 f"{mean_charges:>12.1f}"
             )
 
-    print("\n✓ HRL evaluation complete.")
+    print("\n✓ Ablation evaluation complete.")
 
 
 if __name__ == "__main__":

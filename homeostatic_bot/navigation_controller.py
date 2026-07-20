@@ -1,15 +1,10 @@
-"""Low-level proportional navigation controller for HRL options.
-
-Extracted from threshold_baseline.py. Same obstacle avoidance and proportional
-heading control, but with no charge-threshold decision logic and added
-stop-at-target behavior. Used by HRLMetaEnv as the low-level controller.
-"""
+"""Low-level proportional navigation controller for HRL options."""
 
 from dataclasses import dataclass
 
 import numpy as np
 
-# Observation indices — keep in sync with env_wrapper._compute_flat_obs()
+# Observation indices - keep in sync with env_wrapper._compute_flat_obs()
 _IDX_X = 0
 _IDX_Y = 1
 _IDX_YAW = 2
@@ -20,7 +15,7 @@ _IDX_LIDAR_RIGHT = 9
 
 @dataclass
 class NavigationController:
-    """Proportional controller with reactive obstacle avoidance and stop-at-target."""
+    #Proportional controller with reactive obstacle avoidance and stop-at-target
 
     linear_vel: float = 0.15
     angular_gain: float = 0.6
@@ -31,15 +26,7 @@ class NavigationController:
     stop_radius: float = 0.3
 
     def __call__(self, obs: np.ndarray, target: np.ndarray) -> np.ndarray:
-        """Compute velocity command to navigate toward target.
-
-        Args:
-            obs: 12-D flat observation from HomeostaticBotEnv.
-            target: (x, y) position to navigate to.
-
-        Returns:
-            2-D action [linear_vel, angular_vel].
-        """
+        #Compute velocity command to navigate toward target.
         x, y = obs[_IDX_X], obs[_IDX_Y]
 
         # 1. Stop at target if within radius.

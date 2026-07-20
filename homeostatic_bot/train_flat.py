@@ -1,4 +1,4 @@
-"""TD3 + HER training script for the flat homeostatic baseline (Phase 4)."""
+"""TD3 + HER training script for the flat homeostatic baseline """
 
 from datetime import datetime
 from pathlib import Path
@@ -27,12 +27,6 @@ SEED = 42
 DRAIN_RATE_MOVING = 0.5
 DRAIN_RATE_IDLE = 0.005
 CHARGE_RATE = 2.0
-
-# === Option C: relaxed flat-baseline task ===
-# Cardinal-direction goals with clear straight-line paths from spawn, larger goal radius.
-# Asymmetric protocol: only the flat baseline uses these; threshold and HRL keep
-# methodology defaults (random goals at 0.3 m radius). Rationale and defense framing
-# documented in Phase4_Implementation_Manual_Supplement2.md § 5.
 USE_OPTION_C = True
 
 if USE_OPTION_C:
@@ -44,10 +38,9 @@ if USE_OPTION_C:
         (0.0, -3.0),   # south of spawn — clear straight-line path
     ]
 else:
-    GOAL_RADIUS = 0.3   # methodology default
-    GOAL_SET = None     # random sampling per methodology (Section 1.3)
+    GOAL_RADIUS = 0.3   
+    GOAL_SET = None     
 
-# TD3 hyperparameters (Fujimoto et al. 2018 + SB3 defaults).
 LEARNING_RATE = 3e-4
 BUFFER_SIZE = 100_000
 BATCH_SIZE = 256
@@ -61,8 +54,7 @@ POLICY_DELAY = 2
 ACTION_NOISE_SIGMA_FRACTION = 0.2 # was 0.1
 NET_ARCH = [400, 300]
 
-# HER hyperparameters (Andrychowicz et al. 2017).
-N_SAMPLED_GOAL = 4                         # number of relabeled goals per real goal
+N_SAMPLED_GOAL = 4                         
 GOAL_SELECTION_STRATEGY = "future"         # most common HER strategy
 
 
@@ -74,7 +66,7 @@ def main():
     checkpoint_dir.mkdir(exist_ok=True)
     tb_dir = log_root / "tensorboard"
 
-    # Goal-conditioned env (returns Dict obs and implements compute_reward()).
+    # Goal-conditioned env 
     env = HomeostaticBotEnv(seed=SEED, goal_conditioned=True)
     env.DRAIN_RATE_MOVING = DRAIN_RATE_MOVING
     env.DRAIN_RATE_IDLE = DRAIN_RATE_IDLE
@@ -84,7 +76,7 @@ def main():
 
     env = Monitor(env, filename=str(log_root / "monitor"))
 
-    # Action noise — Gaussian, scaled per-dimension to action range.
+    # Action noise 
     action_high = env.action_space.high
     action_noise = NormalActionNoise(
         mean=np.zeros_like(action_high),
@@ -93,7 +85,6 @@ def main():
 
     policy_kwargs = dict(net_arch=NET_ARCH)
 
-    # MultiInputPolicy is required for Dict observation spaces (i.e. goal-conditioned).
     model = TD3(
         policy="MultiInputPolicy",
         env=env,
